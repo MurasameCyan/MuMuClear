@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   MuMu + Lawnchair 一键工具（连接 / 安装默认桌面 / 黑屏救援）
@@ -106,6 +106,28 @@
   旧的裸 ForceSystem（无 path、无 privapp XML、无 recents）会 FallbackHome。
   本脚本的 -PrivilegedInstall 是实测可用路径。
 
+  ============================================================
+  TouchInteractionService 崩：No layoutter found
+  ============================================================
+  MuMu 大屏/平板类 profile 上，Lawnchair 16 会硬开
+  FeatureFlags.ENABLE_TASKBAR_NAVBAR_UNIFICATION=true，
+  于是 isTaskbarEnabled 恒 true；但 isTaskbarPresent=false 且
+  isPhoneMode=false 时，getUiLayoutter 抛 IllegalStateException
+  "No layoutter found"，TouchInteractionService 起不来，
+  焦点常卡在 NotificationShade。
+
+  交付 APK（Lawnchair_app.lawnchair_signed.apk）已对 classes.dex
+  做同尺寸二进制补丁：把 FeatureFlags.<clinit> 里
+  const/4 v1,1 改为 const/4 v1,0（关闭 unification）。
+  重建：python binpatch_unification_flag.py
+  然后 zipalign + apksigner（testkey）。
+  勿用 smali 整包重编：会出 DEX041，ART 报 Header size 112/120。
+
+  验证（例 127.0.0.1:16384）：
+    - 冷启动无 No layoutter found / 无 Application Error
+    - mCurrentFocus=app.lawnchair/.LawnchairLauncher
+    - dock 图标可启动；Home / 多任务可回桌面
+
   回滚/黑屏救援：
        .\Lawnchair-MuMu.ps1 -RecoverOnly
 
@@ -147,6 +169,10 @@
     -> 再跑默认安装；或加 -DisableStockLauncher
   ForceSystem 后黑屏
     -> 立刻 -RecoverOnly；不要再对 testkey 包用 ForceSystem
+  No layoutter found / 桌面起不来（TouchInteractionService）
+    -> 确认 APK 已用 binpatch_unification_flag.py 关闭
+       ENABLE_TASKBAR_NAVBAR_UNIFICATION；再 -PrivilegedInstall 或
+       覆盖 /system/priv-app/app.lawnchair/app.lawnchair.apk 后 reboot
 
   ============================================================
   旧脚本兼容
