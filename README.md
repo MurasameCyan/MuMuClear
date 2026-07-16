@@ -24,11 +24,14 @@
 3. **覆盖 MuMu 原版广告桌面**（原版本身就是 `app.lawnchair`，装在 `/system/priv-app/Lawnchair`）
 4. 设为默认桌面（HOME）
 
-> **常见问题：清完过一会重启又回到广告桌面**  
+> **常见问题 1：清完过一会重启又回到广告桌面**  
 > MuMu A15 自带桌面包名就是 `app.lawnchair`。旧逻辑若只写 `/system/priv-app/app.lawnchair/` 而不覆盖 `/system/priv-app/Lawnchair/`，重启扫包会回退原版。  
-> 当前脚本会**双路径同时覆盖**，并做同签名用户更新，重启后应保持清爽桌面。  
+> 当前脚本会**双路径同时覆盖**，重启后应保持清爽桌面。  
 > 仍回退时请确认：设置 → 磁盘 → **可写系统** + **Root** 已开，并完整重启过模拟器后再跑一次。
-
+>
+> **常见问题 2：点应用图标弹出「未安装该应用」**  
+> 这不是真的没装，而是桌面没有 `SYSTEM + PRIVILEGED`，拿不到 `MANAGE_ACTIVITY_TASKS`（Lawnchair 启动动画需要）。  
+> **必须**跑 `.\MuMuClear.ps1 -PrivilegedInstall` 并让模拟器**完成重启扫包**；不要只用用户安装 / `-SkipReboot`。
 ## 下载
 
 到 [Releases](https://github.com/MurasameCyan/MuMuClear/releases) 下载 **`MuMuClear-share.zip`**，解压即可。
