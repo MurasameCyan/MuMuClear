@@ -69,7 +69,7 @@
   -HomeActivity          桌面 Activity。默认 app.lawnchair/.LawnchairLauncher
   -Index                 MuMu 多开序号。-1=自动选在线实例（默认）
   -ConnectOnly           只探测端口并 adb connect，不安装
-  -RecoverOnly           黑屏救援：删 priv-app 冲突 + 确保用户包 + 设 HOME + 拉起
+  -RecoverOnly           黑屏救援：重启模拟器 -> 再装包/设 HOME（卡死时必须重启）
   -ForceSystemPrivApp    危险：推到 /system/priv-app/Lawnchair 并尝试系统安装
   -SkipReboot            仅 ForceSystem 时跳过重启
   -DisableStockLauncher  安装后禁用原桌面包（见 -StockLauncher）
@@ -199,7 +199,7 @@ function Show-Usage {
     "常用命令：",
     "  .\Lawnchair-MuMu.ps1                  # 连接+安装+默认桌面（推荐）",
     "  .\Lawnchair-MuMu.ps1 -ConnectOnly     # 只连接",
-    "  .\Lawnchair-MuMu.ps1 -RecoverOnly     # 黑屏救援",
+    "  .\Lawnchair-MuMu.ps1 -RecoverOnly     # 黑屏救援（会先重启模拟器）",
     "  .\Lawnchair-MuMu.ps1 -Index 9         # 指定多开",
     "  .\Lawnchair-MuMu.ps1 -Apk xxx.apk     # 指定 APK（相对脚本目录）",
     "  .\Lawnchair-MuMu.ps1 -DisableStockLauncher",
@@ -219,7 +219,7 @@ function Show-Usage {
     "  默认模式用【用户安装】，稳定。数据目录 /data/user/0/app.lawnchair",
     "",
     "黑了就跑：",
-    "  .\Lawnchair-MuMu.ps1 -RecoverOnly",
+    "  .\Lawnchair-MuMu.ps1 -RecoverOnly   # 会先 reboot 再救援",
     "",
     "更完整的说明写在脚本顶部注释里：",
     "  Get-Content .\Lawnchair-MuMu.ps1 -TotalCount 160",
@@ -405,6 +405,55 @@ function Wait-Device([string]$AdbPath, [string]$Serial, [int]$TimeoutSec = 90) {
   return $false
 }
 
+function Wait-BootReady([string]$AdbPath, [string]$Serial, [int]$TimeoutSec = 180) {
+  Write-Step "等待模拟器启动完成"
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if ($Serial -match "^127\.0\.0\.1:") { $null = Invoke-Adb $AdbPath connect $Serial }
+    $state = (Invoke-Adb $AdbPath -s $Serial get-state 2>$null).Trim()
+    if ($state -eq "device") {
+      $boot = (Invoke-Adb $AdbPath -s $Serial shell getprop sys.boot_completed 2>$null).Trim()
+      $anim = (Invoke-Adb $AdbPath -s $Serial shell getprop init.svc.bootanim 2>$null).Trim()
+      # boot_completed=1 且 bootanim 停止/空 视为可操作
+      if ($boot -eq "1" -and ($anim -eq "stopped" -or [string]::IsNullOrWhiteSpace($anim))) {
+        # 再等一下 Settings/PM 就绪
+        Start-Sleep -Seconds 3
+        Write-Ok "boot_completed=1"
+        return $true
+      }
+      Write-Host "  boot=$boot anim=$anim ..." -ForegroundColor DarkGray
+    } else {
+      Write-Host "  state=$state ..." -ForegroundColor DarkGray
+    }
+    Start-Sleep -Seconds 3
+  }
+  return $false
+}
+
+function Reboot-And-Reconnect([string]$AdbPath, [string]$Serial, [int]$TimeoutSec = 180) {
+  Write-Step "重启模拟器（FallbackHome 硬救援必需）"
+  # 尽量 root 后再 reboot，失败也继续
+  try { $null = Invoke-Adb $AdbPath -s $Serial root } catch {}
+  Start-Sleep -Seconds 1
+  if ($Serial -match "^127\.0\.0\.1:") { $null = Invoke-Adb $AdbPath connect $Serial }
+  $null = Invoke-Adb $AdbPath -s $Serial reboot
+  Write-Ok "已发送 reboot，等待掉线再重连..."
+  Start-Sleep -Seconds 8
+
+  # 重启期间持续 connect，直到 boot ready
+  if (-not (Wait-BootReady $AdbPath $Serial $TimeoutSec)) {
+    throw "重启后等待启动超时（$TimeoutSec 秒）。请确认 MuMu 已起来后再跑 -RecoverOnly"
+  }
+  # 启动后重新 root（很多环境 reboot 后 adbd 掉 root）
+  $null = Invoke-Adb $AdbPath -s $Serial root
+  Start-Sleep -Seconds 2
+  if ($Serial -match "^127\.0\.0\.1:") { $null = Invoke-Adb $AdbPath connect $Serial }
+  if (-not (Wait-Device $AdbPath $Serial 60)) {
+    throw "重启后 root/重连失败: $Serial"
+  }
+  Write-Ok "重启完成，设备可操作"
+}
+
 function Ensure-Root([string]$AdbPath, [string]$Serial) {
   Write-Step "adb root"
   $null = Invoke-Adb $AdbPath -s $Serial root
@@ -417,9 +466,23 @@ function Ensure-Root([string]$AdbPath, [string]$Serial) {
 
 function Remove-SystemPrivAppConflict([string]$AdbPath, [string]$Serial) {
   Write-Step "移除系统 priv-app 冲突（避免 FallbackHome 黑屏）"
-  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair"
+  # 先卸包再删文件，避免系统签名残留占坑
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair /data/app/*$PackageName* 2>/dev/null"
+  # 再扫一次路径
+  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
+  if ($path -match "package:") {
+    Write-Warn "卸载后仍见包路径: $path ，强制删文件"
+    if ($path -match "package:(.+)$") {
+      $apkFile = $Matches[1].Trim()
+      $dir = Split-Path $apkFile -Parent
+      $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf `"$apkFile`" `"$dir`""
+    }
+    $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1"
+  }
   $check = (Invoke-Adb $AdbPath -s $Serial shell "ls /system/priv-app 2>/dev/null | grep -i lawn || echo CLEAN").Trim()
-  Write-Ok "priv-app Lawnchair: $check"
+  $path2 = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
+  Write-Ok "priv-app Lawnchair: $check ; pm path: $(if ($path2) { $path2 } else { 'none' })"
 }
 
 function Install-UserHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
@@ -447,26 +510,63 @@ function Set-DefaultHome([string]$AdbPath, [string]$Serial) {
   else { Write-Warn "若未切换成功，请在模拟器弹窗选择 Lawnchair -> 始终" }
 }
 
-function Recover-FallbackHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
-  Write-Step "救援 FallbackHome 黑屏"
+function Install-Or-Repair-UserHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
+  if (-not (Test-Path -LiteralPath $ApkPath)) { throw "需要 APK: $ApkPath" }
+  $full = (Resolve-Path -LiteralPath $ApkPath).Path
+
   Ensure-Root $AdbPath $Serial
   Remove-SystemPrivAppConflict $AdbPath $Serial
 
+  # 关键：无论原先有没有包，都先卸再装用户版。
+  # 系统 priv-app 签名与 testkey 不一致时，-r 会 UPDATE_INCOMPATIBLE。
+  Write-Step "安装用户版 Lawnchair（强制卸旧包）"
+  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair"
+
+  $out = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
+  Write-Host "  $out"
+  if ($out -notmatch "Success") {
+    # 再清一次系统残留后重试
+    Write-Warn "安装失败，二次清理后重试..."
+    Remove-SystemPrivAppConflict $AdbPath $Serial
+    $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
+    $out = (Invoke-Adb $AdbPath -s $Serial install -g $full).Trim()
+    Write-Host "  retry: $out"
+    if ($out -notmatch "Success") { throw "安装失败: $out" }
+  }
+
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
-  if ($path -notmatch "package:") {
-    Write-Warn "包不存在，重新安装"
-    if (-not (Test-Path -LiteralPath $ApkPath)) { throw "需要 APK: $ApkPath" }
-    $full = (Resolve-Path -LiteralPath $ApkPath).Path
-    $out = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
-    Write-Host "  $out"
-  } else {
-    Write-Ok "已有包: $path"
+  Write-Ok "pm path: $path"
+  if ($path -match "/system/") {
+    throw "包仍落在 system 分区（$path），签名冲突风险高。请确认已删 /system/priv-app/Lawnchair"
   }
 
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
   $start = (Invoke-Adb $AdbPath -s $Serial shell "am start -n $HomeActivity -W").Trim()
   Write-Host "  $start"
-  Show-Status $AdbPath $Serial
+  Start-Sleep -Seconds 2
+  $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+  Start-Sleep -Seconds 1
+}
+
+function Recover-FallbackHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
+  Write-Step "救援 FallbackHome 黑屏"
+  # 实测：卡在 FallbackHome 时仅 adb 救援经常无效，必须先重启模拟器
+  if (-not $SkipReboot) {
+    Reboot-And-Reconnect $AdbPath $Serial 180
+  } else {
+    Write-Warn "SkipReboot：跳过重启，仅软救援（可能无效）"
+    if (-not (Wait-Device $AdbPath $Serial 30)) { throw "设备未就绪" }
+  }
+
+  Install-Or-Repair-UserHome $AdbPath $Serial $ApkPath
+  if (Show-Status $AdbPath $Serial) { return $true }
+
+  # 重启后仍失败，再软修一轮
+  Write-Warn "重启救援后仍未就绪，再修一轮..."
+  Install-Or-Repair-UserHome $AdbPath $Serial $ApkPath
+  return (Show-Status $AdbPath $Serial)
 }
 
 function Install-ForceSystem([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
@@ -517,38 +617,21 @@ function Test-IsFallbackHome([string]$AdbPath, [string]$Serial) {
 
 function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [int]$MaxTries = 2) {
   Write-Step "防卡住校验（安装后自动救援）"
-  for ($i = 1; $i -le $MaxTries; $i++) {
-    # 清系统冲突 + 确保用户包 + HOME + 拉起
-    Ensure-Root $AdbPath $Serial
-    Remove-SystemPrivAppConflict $AdbPath $Serial
 
-    $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
-    if ($path -notmatch "package:") {
-      Write-Warn "第 $i 次：包不存在，重新安装"
-      $full = (Resolve-Path -LiteralPath $ApkPath).Path
-      $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
-      $out = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
-      Write-Host "  $out"
-      if ($out -notmatch "Success") { throw "防卡住安装失败: $out" }
-    } else {
-      Write-Ok "第 $i 次：已有包 $path"
-    }
-
-    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
-    $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
-    $null = Invoke-Adb $AdbPath -s $Serial shell "am start -n $HomeActivity"
-    Start-Sleep -Seconds 2
-    $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
-    Start-Sleep -Seconds 1
-
+  # 第一轮：软修复（不重启）
+  Write-Ok "第 1 步：软修复（不重启）"
+  try {
+    Install-Or-Repair-UserHome $AdbPath $Serial $ApkPath
     if (Show-Status $AdbPath $Serial) { return $true }
+  } catch {
+    Write-Warn "软修复异常: $($_.Exception.Message)"
+  }
 
-    if (Test-IsFallbackHome $AdbPath $Serial) {
-      Write-Warn "第 $i 次仍 FallbackHome，执行完整救援..."
-      Recover-FallbackHome $AdbPath $Serial $ApkPath
-      Start-Sleep -Seconds 1
-      if (Show-Status $AdbPath $Serial) { return $true }
-    }
+  # 第二轮起：重启模拟器再救援（你确认的有效方法）
+  for ($i = 1; $i -le $MaxTries; $i++) {
+    Write-Warn "第 $($i+1) 步：重启模拟器后再救援 ($i/$MaxTries)"
+    $ok = Recover-FallbackHome $AdbPath $Serial $ApkPath
+    if ($ok) { return $true }
   }
   return (Show-Status $AdbPath $Serial)
 }
@@ -607,15 +690,21 @@ try {
   }
 
   if ($RecoverOnly) {
-    Recover-FallbackHome $adb $serial $apkPath
-    $null = Ensure-HomeReady $adb $serial $apkPath 2
+    # 你确认有效的路径：重启模拟器 -> 再装/设 HOME
+    $ok = Recover-FallbackHome $adb $serial $apkPath
+    if (-not $ok) {
+      Write-Warn "首轮重启救援失败，再来一轮..."
+      $ok = Recover-FallbackHome $adb $serial $apkPath
+    }
+    if (-not $ok) { throw "重启救援后仍卡在 FallbackHome" }
+    Write-Ok "救援成功"
     exit 0
   }
 
-  # 若一上来就卡 FallbackHome，先救一次再继续安装
+  # 若一上来就卡 FallbackHome，先重启救援再继续安装
   if (Test-IsFallbackHome $adb $serial) {
-    Write-Warn "连接后发现 FallbackHome，先自动救援"
-    Recover-FallbackHome $adb $serial $apkPath
+    Write-Warn "连接后发现 FallbackHome，先重启模拟器并救援"
+    $null = Recover-FallbackHome $adb $serial $apkPath
   }
 
   if ($ForceSystemPrivApp) {
