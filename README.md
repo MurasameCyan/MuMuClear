@@ -20,9 +20,14 @@
 ## 做什么
 
 1. 自动连接本机 MuMu 的 adb
-2. 以系统特权方式安装已适配 Android 15 的 Lawnchair
-3. 设为默认桌面（HOME）
-4. 去掉原系统桌面带来的广告/推广入口（通过替换默认启动器实现）
+2. 以系统特权方式安装已适配 Android 15 的清爽 Lawnchair
+3. **覆盖 MuMu 原版广告桌面**（原版本身就是 `app.lawnchair`，装在 `/system/priv-app/Lawnchair`）
+4. 设为默认桌面（HOME）
+
+> **常见问题：清完过一会重启又回到广告桌面**  
+> MuMu A15 自带桌面包名就是 `app.lawnchair`。旧逻辑若只写 `/system/priv-app/app.lawnchair/` 而不覆盖 `/system/priv-app/Lawnchair/`，重启扫包会回退原版。  
+> 当前脚本会**双路径同时覆盖**，并做同签名用户更新，重启后应保持清爽桌面。  
+> 仍回退时请确认：设置 → 磁盘 → **可写系统** + **Root** 已开，并完整重启过模拟器后再跑一次。
 
 ## 下载
 

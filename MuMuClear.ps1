@@ -94,10 +94,17 @@
   2) adb root
   3) 安装 static RRO：config_recentsComponentName=app.lawnchair/...RecentsActivity
   4) 写入 /system/etc/permissions/privapp-permissions-app.lawnchair.xml
-  5) 推送 APK 到 /system/priv-app/app.lawnchair/（SYSTEM+PRIVILEGED）
+  5) 覆盖 MuMu 原版桌面双路径（同包名 app.lawnchair）：
+       /system/priv-app/app.lawnchair/app.lawnchair.apk
+       /system/priv-app/Lawnchair/Lawnchair.apk   <--- 原版广告桌面路径，必须覆盖
   6) 重启，PackageManager 授予 MANAGE_ACTIVITY_TASKS 等
-  7) set-home-activity + 拉起 Lawnchair
+  7) 同签名用户更新（UPDATED_SYSTEM_APP）+ set-home-activity + 拉起
   数据目录仍是：/data/user/0/app.lawnchair
+
+  为何「清完一会重启又恢复原版」：
+  MuMu A15 自带桌面就是 app.lawnchair（带广告/会员 SDK，装在
+  /system/priv-app/Lawnchair）。若只写 app.lawnchair/ 不覆盖 Lawnchair/，
+  重启扫包会回到广告桌面。本脚本现在双路径都覆盖。
 
   ============================================================
   为什么用户安装会“未安装”
@@ -170,8 +177,10 @@
        .\tool\Adb\adb.exe -s <serial> uninstall app.lawnchair
   黑屏 / FallbackHome
     -> .\MuMuClear.ps1 -RecoverOnly
-  按 Home 仍回原桌面
-    -> 再跑默认安装；或加 -DisableStockLauncher
+  按 Home 仍回原桌面 / 重启后又广告桌面
+    -> 再跑默认安装（现已覆盖 /system/priv-app/Lawnchair）
+    -> 确认 MuMu 设置里「可写系统」已开并重启过模拟器
+    -> 可选: -DisableStockLauncher（若另有原桌面包）
   ForceSystem 后黑屏
     -> 立刻 -RecoverOnly；不要再对 testkey 包用 ForceSystem
   No layoutter found / 桌面起不来（TouchInteractionService）
@@ -578,13 +587,15 @@ function Install-UserHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
 function Set-DefaultHome([string]$AdbPath, [string]$Serial) {
   Write-Step "设为默认桌面"
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "cmd role add-role-holder android.app.role.HOME $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
   $resolved = (Invoke-Adb $AdbPath -s $Serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
+  $role = (Invoke-Adb $AdbPath -s $Serial shell "cmd role get-role-holders android.app.role.HOME 2>/dev/null").Trim()
   Write-Host "  HOME: $resolved"
+  Write-Host "  ROLE: $role"
   if ($resolved -match [regex]::Escape($PackageName)) { Write-Ok "已是默认桌面" }
   else { Write-Warn "若未切换成功，请在模拟器弹窗选择 Lawnchair -> 始终" }
 }
-
 function Install-Or-Repair-UserHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
   if (-not (Test-Path -LiteralPath $ApkPath)) { throw "需要 APK: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
@@ -702,25 +713,63 @@ function Remove-RecentsOverlay([string]$AdbPath, [string]$Serial) {
   $null = Invoke-Adb $AdbPath -s $Serial shell "rm -f /product/overlay/LawnchairRecentsOverlay.apk /system/product/overlay/LawnchairRecentsOverlay.apk /vendor/overlay/LawnchairRecentsOverlay.apk 2>/dev/null"
 }
 
+function Test-IsStockMuMuLauncher([string]$AdbPath, [string]$Serial) {
+  # MuMu A15 原版桌面就是 app.lawnchair（/system/priv-app/Lawnchair），带广告/会员 SDK。
+  # 特征：versionName 15.0.0.1，或存在 com.mumu.core 组件。
+  $info = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep -E 'versionName=|codePath=|MuMuNotification|com\.mumu\.core' | head -12").Trim()
+  if (-not $info) { return $false }
+  if ($info -match "versionName=15\.0\.0\.1") { return $true }
+  if ($info -match "com\.mumu\.core|MuMuNotification") { return $true }
+  if ($info -match "codePath=/system/priv-app/Lawnchair" -and $info -notmatch "16\.Dev") { return $true }
+  return $false
+}
+
+function Install-SystemLawnchairApk([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
+  # MuMu 原版路径是 /system/priv-app/Lawnchair/Lawnchair.apk（同包名 app.lawnchair）。
+  # 只写 app.lawnchair/ 时，重启扫包仍可能落回原版广告桌面。
+  # 实测：双路径都覆盖清爽 APK + 可选用户更新，重启后不会回退。
+  $full = (Resolve-Path -LiteralPath $ApkPath).Path
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
+       /system/priv-app/lawnchair /system/app/lawnchair \
+       /system/priv-app/app.lawnchair /system/app/app.lawnchair \
+       /product/priv-app/Lawnchair /product/priv-app/app.lawnchair \
+       /system_ext/priv-app/Lawnchair /system_ext/priv-app/app.lawnchair
+mkdir -p /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
+"@
+  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_lawnchair.apk
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+cp /data/local/tmp/mumu_clear_lawnchair.apk /system/priv-app/app.lawnchair/app.lawnchair.apk
+cp /data/local/tmp/mumu_clear_lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+chmod 755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
+chmod 644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+chown root:root /system/priv-app/app.lawnchair /system/priv-app/app.lawnchair/app.lawnchair.apk \
+                 /system/priv-app/Lawnchair /system/priv-app/Lawnchair/Lawnchair.apk
+rm -rf /system/priv-app/app.lawnchair/oat /system/priv-app/Lawnchair/oat
+# 清掉旧包缓存，避免扫包沿用原版签名/路径
+rm -rf /data/system/package_cache/*/*[Ll]awnchair* /data/system/package_cache/*/*lawnchair* 2>/dev/null
+sync
+ls -la /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+"@
+  Write-Ok "已覆盖系统路径: /system/priv-app/app.lawnchair + /system/priv-app/Lawnchair"
+}
+
 function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
   Write-Step "特权安装: priv-app + privapp-permissions + recents overlay"
   Write-Host "  修复用户安装时点击图标 '未安装'（remoteAnimation / MANAGE_ACTIVITY_TASKS）" -ForegroundColor DarkGray
+  Write-Host "  并覆盖 MuMu 原版桌面路径，避免重启后广告桌面回退" -ForegroundColor DarkGray
   if (-not (Test-Path -LiteralPath $ApkPath)) { throw "APK 不存在: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
   Ensure-Root $AdbPath $Serial
 
-  # 卸用户副本，避免与 system 冲突
-  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
-  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
+  if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
+    Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖 /system/priv-app/Lawnchair"
+  }
 
-  # 旧目录清理 + 规范路径 /system/priv-app/app.lawnchair
-  $null = Invoke-Adb $AdbPath -s $Serial shell @"
-rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
-       /system/priv-app/lawnchair /system/app/lawnchair \
-       /system/priv-app/app.lawnchair /system/app/app.lawnchair
-mkdir -p /system/priv-app/app.lawnchair
-"@
+  # 卸用户副本，避免与 system 冲突（签名不一致时 -r 会失败）
+  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /data/app/*app.lawnchair* /data/app/*lawnchair* 2>/dev/null"
 
   Install-RecentsOverlay $AdbPath $Serial
 
@@ -740,9 +789,8 @@ mkdir -p /system/priv-app/app.lawnchair
   $null = Invoke-Adb $AdbPath -s $Serial push $xmlLocal /system/etc/permissions/privapp-permissions-app.lawnchair.xml
   $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml; chown root:root /system/etc/permissions/privapp-permissions-app.lawnchair.xml"
 
-  $push = (Invoke-Adb $AdbPath -s $Serial push $full /system/priv-app/app.lawnchair/app.lawnchair.apk).Trim()
-  Write-Host "  $push"
-  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/priv-app/app.lawnchair/app.lawnchair.apk; chown root:root /system/priv-app/app.lawnchair/app.lawnchair.apk; rm -rf /system/priv-app/app.lawnchair/oat"
+  # 双路径覆盖：规范包名目录 + MuMu 原版目录
+  Install-SystemLawnchairApk $AdbPath $Serial $full
 
   if (-not $SkipReboot) {
     Write-Step "重启以使 priv-app / overlay / 权限生效（必需）"
@@ -752,17 +800,33 @@ mkdir -p /system/priv-app/app.lawnchair
     Write-Warn "SkipReboot：权限/系统标志可能未生效"
   }
 
+  # 重启后若扫包未捡到 system 包，或仍是原版广告桌面：再盖一次并 pm install
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
-  Write-Ok "pm path: $path"
-  if ($path -notmatch "/system/") {
-    # 若扫包失败，尝试 pm install 从 system 路径
-    Write-Warn "系统扫包未见 system 路径，尝试 pm install 系统路径"
+  $isStock = Test-IsStockMuMuLauncher $AdbPath $Serial
+  if ($path -notmatch $PackageName -or $isStock -or $path -notmatch "/system/") {
+    Write-Warn "重启后包未就绪或仍是原版，二次覆盖 system 路径并安装"
+    Install-SystemLawnchairApk $AdbPath $Serial $full
     $ins = (Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk").Trim()
-    Write-Host "  $ins"
+    Write-Host "  system-install: $ins"
+    if ($ins -notmatch "Success") {
+      # 用户更新作为兜底（同签名时成为 UPDATED_SYSTEM_APP，重启仍保持清爽包）
+      Write-Warn "system 路径 install 失败，尝试用户空间更新安装"
+      $ins2 = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
+      Write-Host "  user-install: $ins2"
+    }
     $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   }
+
+  # 再做一次同签名用户更新：形成 UPDATED_SYSTEM_APP，HOME 偏好更稳
+  $null = Invoke-Adb $AdbPath -s $Serial install -r -g $full
+
+  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
+  Write-Ok "pm path: $path"
   if ($path -notmatch $PackageName) {
     throw "特权安装后未找到 $PackageName。请 -RecoverOnly 回滚用户安装。"
+  }
+  if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
+    throw "安装后仍检测到 MuMu 原版广告桌面组件。请确认已开启「可写系统」并重试。"
   }
 
   $flags = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName | grep -E 'pkgFlags=|privateFlags=|privatePkgFlags=' | head -4").Trim()
@@ -779,6 +843,7 @@ mkdir -p /system/priv-app/app.lawnchair
   Write-Host "  $recents"
 
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "cmd role add-role-holder android.app.role.HOME $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm clear $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm grant $PackageName android.permission.POST_NOTIFICATIONS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_AUDIO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_CONTACTS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1"
@@ -796,11 +861,17 @@ function Show-Status([string]$AdbPath, [string]$Serial) {
   $pkgPath = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   $homeInfo = (Invoke-Adb $AdbPath -s $Serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
   $focus = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys window | grep mCurrentFocus").Trim()
+  $ver = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
   Write-Host "  pm path : $pkgPath"
+  Write-Host "  version : $ver"
   Write-Host "  HOME    : $homeInfo"
   Write-Host "  focus   : $focus"
+  if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
+    Write-Warn "仍是 MuMu 原版广告桌面（需覆盖 /system/priv-app/Lawnchair 后重启）"
+    return $false
+  }
   if ($homeInfo -match [regex]::Escape($PackageName) -and $focus -match "LawnchairLauncher") {
-    Write-Ok "桌面正常"
+    Write-Ok "桌面正常（清爽 Lawnchair）"
     return $true
   }
   if ($homeInfo -match "FallbackHome") {
@@ -810,7 +881,6 @@ function Show-Status([string]$AdbPath, [string]$Serial) {
   }
   return $false
 }
-
 function Test-IsFallbackHome([string]$AdbPath, [string]$Serial) {
   $homeInfo = (Invoke-Adb $AdbPath -s $Serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
   $focus = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys window | grep mCurrentFocus").Trim()
