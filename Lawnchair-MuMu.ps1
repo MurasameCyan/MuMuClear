@@ -465,24 +465,31 @@ function Ensure-Root([string]$AdbPath, [string]$Serial) {
 }
 
 function Remove-SystemPrivAppConflict([string]$AdbPath, [string]$Serial) {
-  Write-Step "移除系统 priv-app 冲突（避免 FallbackHome 黑屏）"
-  # 先卸包再删文件，避免系统签名残留占坑
+  Write-Step "移除系统 priv-app 冲突（避免 FallbackHome / 签名冲突）"
+  # MuMu 常见系统路径：
+  #   /system/priv-app/Lawnchair
+  #   /system/priv-app/app.lawnchair   <--- 很多机型是这个，之前漏删会导致 UPDATE_INCOMPATIBLE
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
-  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair /data/app/*$PackageName* 2>/dev/null"
-  # 再扫一次路径
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
+       /system/priv-app/app.lawnchair /system/app/app.lawnchair \
+       /system/priv-app/lawnchair /system/app/lawnchair \
+       /product/priv-app/Lawnchair /product/priv-app/app.lawnchair \
+       /system_ext/priv-app/Lawnchair /system_ext/priv-app/app.lawnchair \
+       /data/app/*lawnchair* /data/app/*Lawnchair* 2>/dev/null
+"@
+  # 按 pm path 再扫尾
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
-  if ($path -match "package:") {
-    Write-Warn "卸载后仍见包路径: $path ，强制删文件"
-    if ($path -match "package:(.+)$") {
-      $apkFile = $Matches[1].Trim()
-      $dir = Split-Path $apkFile -Parent
-      $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf `"$apkFile`" `"$dir`""
-    }
+  if ($path -match "package:(.+)$") {
+    $apkFile = $Matches[1].Trim()
+    Write-Warn "仍见包路径: $apkFile ，强制删除"
+    $dir = Split-Path $apkFile -Parent
+    $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf `"$apkFile`" `"$dir`""
     $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1"
   }
-  $check = (Invoke-Adb $AdbPath -s $Serial shell "ls /system/priv-app 2>/dev/null | grep -i lawn || echo CLEAN").Trim()
+  $check = (Invoke-Adb $AdbPath -s $Serial shell "ls /system/priv-app 2>/dev/null | grep -iE 'lawn|app\.lawn' || echo CLEAN").Trim()
   $path2 = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
-  Write-Ok "priv-app Lawnchair: $check ; pm path: $(if ($path2) { $path2 } else { 'none' })"
+  Write-Ok "system lawn dirs: $check ; pm path: $(if ($path2) { $path2 } else { 'none' })"
 }
 
 function Install-UserHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
@@ -521,7 +528,7 @@ function Install-Or-Repair-UserHome([string]$AdbPath, [string]$Serial, [string]$
   # 系统 priv-app 签名与 testkey 不一致时，-r 会 UPDATE_INCOMPATIBLE。
   Write-Step "安装用户版 Lawnchair（强制卸旧包）"
   $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
-  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair /system/priv-app/app.lawnchair /system/app/app.lawnchair"
 
   $out = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
   Write-Host "  $out"
