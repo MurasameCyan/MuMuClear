@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   MuMu + Lawnchair 一键工具（连接 / 安装默认桌面 / 黑屏救援）
@@ -56,9 +56,10 @@
   # 安装后顺便禁用原系统桌面包（可选）
   .\Lawnchair-MuMu.ps1 -DisableStockLauncher -StockLauncher com.android.launcher3
 
-  # 危险：覆盖 /system/priv-app（需与原系统签名一致；testkey 包会黑屏）
+  # 特权安装（修复点击图标“未安装”）：priv-app + privapp XML + recents overlay
+  .\Lawnchair-MuMu.ps1 -PrivilegedInstall
+  # 兼容旧开关名（同 PrivilegedInstall）
   .\Lawnchair-MuMu.ps1 -ForceSystemPrivApp
-  .\Lawnchair-MuMu.ps1 -ForceSystemPrivApp -SkipReboot
 
   ============================================================
   参数说明
@@ -69,38 +70,43 @@
   -HomeActivity          桌面 Activity。默认 app.lawnchair/.LawnchairLauncher
   -Index                 MuMu 多开序号。-1=自动选在线实例（默认）
   -ConnectOnly           只探测端口并 adb connect，不安装
-  -RecoverOnly           黑屏救援：重启模拟器 -> 再装包/设 HOME（卡死时必须重启）
-  -ForceSystemPrivApp    危险：推到 /system/priv-app/Lawnchair 并尝试系统安装
-  -SkipReboot            仅 ForceSystem 时跳过重启
+  -RecoverOnly           黑屏/回滚：重启 -> 清 priv-app/overlay -> 用户安装 -> 设 HOME
+  -PrivilegedInstall     推荐修复“未安装”：系统 priv-app + recents overlay + 重启
+  -ForceSystemPrivApp    兼容别名，等价 -PrivilegedInstall
+  -SkipReboot            跳过重启（特权安装几乎总是需要重启，慎用）
+  -UserInstallOnly       仅用户空间安装（会“未安装”，仅调试用）
   -DisableStockLauncher  安装后禁用原桌面包（见 -StockLauncher）
   -StockLauncher         要禁用的原桌面包名
   -NoProxyPorts          不连 7555/55xx 代理口，只连配置文件真实端口
   -Help                  打印使用说明后退出
 
-  ConnectOnly / RecoverOnly / ForceSystemPrivApp 三选一，不能同时开。
+  ConnectOnly / RecoverOnly / PrivilegedInstall 三选一，不能同时开。
 
   ============================================================
-  默认模式实际做了什么
+  默认模式实际做了什么（PrivilegedInstall）
   ============================================================
   1) 读 MuMu vms 配置 + 监听端口，自动 adb connect
   2) adb root
-  3) 删除 /system/priv-app/Lawnchair（避免签名冲突）
-  4) 用户空间 install -r -g 安装 APK
-  5) cmd package set-home-activity 设默认桌面
-  6) 拉起 Lawnchair 并打印状态
-
-  ============================================================
-  为什么不要直接覆盖系统桌面
-  ============================================================
-  MuMu 原系统 Lawnchair 是官方签名。
-  本仓库 APK 是 testkey 重签。
-  用重签包覆盖 /system/priv-app 后，重启 PackageManager 扫包失败，
-  系统只剩 com.android.settings/.FallbackHome → 黑屏。
-
-  稳定方案：用户安装 + 默认 HOME。
+  3) 安装 static RRO：config_recentsComponentName=app.lawnchair/...RecentsActivity
+  4) 写入 /system/etc/permissions/privapp-permissions-app.lawnchair.xml
+  5) 推送 APK 到 /system/priv-app/app.lawnchair/（SYSTEM+PRIVILEGED）
+  6) 重启，PackageManager 授予 MANAGE_ACTIVITY_TASKS 等
+  7) set-home-activity + 拉起 Lawnchair
   数据目录仍是：/data/user/0/app.lawnchair
 
-  黑了就跑：
+  ============================================================
+  为什么用户安装会“未安装”
+  ============================================================
+  Lawnchair 16 Quickstep 启动图标会带 remoteAnimationAdapter。
+  这需要 android.permission.MANAGE_ACTIVITY_TASKS（signature|recents）
+  与 CONTROL_REMOTE_APP_TRANSITION_ANIMATIONS（signature|privileged|recents）。
+  用户安装无法获得这些权限 → SecurityException → 误报“未安装该应用”。
+  修复：系统 priv-app + recents overlay（把 Lawnchair 标为 recents 组件）。
+
+  旧的裸 ForceSystem（无 path、无 privapp XML、无 recents）会 FallbackHome。
+  本脚本的 -PrivilegedInstall 是实测可用路径。
+
+  回滚/黑屏救援：
        .\Lawnchair-MuMu.ps1 -RecoverOnly
 
   ============================================================
@@ -157,10 +163,13 @@ param(
   [string]$Apk = "Lawnchair_app.lawnchair_signed.apk",
   [string]$PackageName = "app.lawnchair",
   [string]$HomeActivity = "app.lawnchair/.LawnchairLauncher",
+  [string]$RecentsActivity = "app.lawnchair/com.android.quickstep.RecentsActivity",
   [int]$Index = -1,
   [switch]$ConnectOnly,
   [switch]$RecoverOnly,
-  [switch]$ForceSystemPrivApp,
+  [Alias("ForceSystemPrivApp")]
+  [switch]$PrivilegedInstall,
+  [switch]$UserInstallOnly,
   [switch]$SkipReboot,
   [switch]$DisableStockLauncher,
   [string]$StockLauncher = "com.google.android.apps.nexuslauncher",
@@ -469,6 +478,7 @@ function Remove-SystemPrivAppConflict([string]$AdbPath, [string]$Serial) {
   # MuMu 常见系统路径：
   #   /system/priv-app/Lawnchair
   #   /system/priv-app/app.lawnchair   <--- 很多机型是这个，之前漏删会导致 UPDATE_INCOMPATIBLE
+  # 同时清 recents overlay + privapp xml（RecoverOnly 回滚特权安装）
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell @"
 rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
@@ -477,6 +487,10 @@ rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
        /product/priv-app/Lawnchair /product/priv-app/app.lawnchair \
        /system_ext/priv-app/Lawnchair /system_ext/priv-app/app.lawnchair \
        /data/app/*lawnchair* /data/app/*Lawnchair* 2>/dev/null
+rm -f /system/etc/permissions/privapp-permissions-app.lawnchair.xml \
+      /product/overlay/LawnchairRecentsOverlay.apk \
+      /system/product/overlay/LawnchairRecentsOverlay.apk \
+      /vendor/overlay/LawnchairRecentsOverlay.apk 2>/dev/null
 "@
   # 按 pm path 再扫尾
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
@@ -576,24 +590,139 @@ function Recover-FallbackHome([string]$AdbPath, [string]$Serial, [string]$ApkPat
   return (Show-Status $AdbPath $Serial)
 }
 
-function Install-ForceSystem([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
-  Write-Step "危险模式: ForceSystemPrivApp"
-  Write-Warn "testkey 重签包在 MuMu 上重启后常扫包失败并黑屏。仅在签名=原系统签名时使用。"
-  Ensure-Root $AdbPath $Serial
+function Get-PrivAppPermissionsXml {
+  return @"
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="app.lawnchair">
+        <permission name="android.permission.CONTROL_REMOTE_APP_TRANSITION_ANIMATIONS"/>
+        <permission name="android.permission.STATUS_BAR"/>
+        <permission name="android.permission.STATUS_BAR_SERVICE"/>
+        <permission name="android.permission.FORCE_STOP_PACKAGES"/>
+        <permission name="android.permission.MANAGE_USERS"/>
+        <permission name="android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS"/>
+        <permission name="android.permission.START_TASKS_FROM_RECENTS"/>
+        <permission name="android.permission.STOP_APP_SWITCHES"/>
+        <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
+        <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+        <permission name="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+        <permission name="android.permission.INTERNAL_SYSTEM_WINDOW"/>
+        <permission name="android.permission.MANAGE_ACTIVITY_TASKS"/>
+        <permission name="android.permission.REMOVE_TASKS"/>
+        <permission name="android.permission.READ_FRAME_BUFFER"/>
+        <permission name="android.permission.MONITOR_INPUT"/>
+        <permission name="android.permission.SYSTEM_APPLICATION_OVERLAY"/>
+        <permission name="android.permission.SUSPEND_APPS"/>
+    </privapp-permissions>
+</permissions>
+"@
+}
+
+function Install-RecentsOverlay([string]$AdbPath, [string]$Serial) {
+  Write-Step "安装 recents overlay (config_recentsComponentName)"
+  $overlayLocal = Join-Path $ScriptDir "LawnchairRecentsOverlay.apk"
+  if (-not (Test-Path -LiteralPath $overlayLocal)) {
+    throw "缺少 LawnchairRecentsOverlay.apk（应与脚本同目录）。该 RRO 把 Lawnchair 标为 recents 组件。"
+  }
+  $full = (Resolve-Path -LiteralPath $overlayLocal).Path
+  $null = Invoke-Adb $AdbPath -s $Serial shell "mkdir -p /product/overlay /system/product/overlay"
+  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/LawnchairRecentsOverlay.apk
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+cp /data/local/tmp/LawnchairRecentsOverlay.apk /product/overlay/LawnchairRecentsOverlay.apk
+cp /data/local/tmp/LawnchairRecentsOverlay.apk /system/product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null
+chmod 644 /product/overlay/LawnchairRecentsOverlay.apk
+chown root:root /product/overlay/LawnchairRecentsOverlay.apk
+ls -la /product/overlay/LawnchairRecentsOverlay.apk
+"@
+  Write-Ok "overlay 已推送: /product/overlay/LawnchairRecentsOverlay.apk"
+}
+
+function Remove-RecentsOverlay([string]$AdbPath, [string]$Serial) {
+  Write-Step "移除 recents overlay"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -f /product/overlay/LawnchairRecentsOverlay.apk /system/product/overlay/LawnchairRecentsOverlay.apk /vendor/overlay/LawnchairRecentsOverlay.apk 2>/dev/null"
+}
+
+function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
+  Write-Step "特权安装: priv-app + privapp-permissions + recents overlay"
+  Write-Host "  修复用户安装时点击图标 '未安装'（remoteAnimation / MANAGE_ACTIVITY_TASKS）" -ForegroundColor DarkGray
+  if (-not (Test-Path -LiteralPath $ApkPath)) { throw "APK 不存在: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
-  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
-  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /system/priv-app/Lawnchair; mkdir -p /system/priv-app/Lawnchair"
-  $push = (Invoke-Adb $AdbPath -s $Serial push $full /system/priv-app/Lawnchair/Lawnchair.apk).Trim()
-  Write-Host "  $push"
-  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/priv-app/Lawnchair/Lawnchair.apk; chown root:root /system/priv-app/Lawnchair/Lawnchair.apk; rm -rf /system/priv-app/Lawnchair/oat"
+  Ensure-Root $AdbPath $Serial
 
-  $ins = (Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/Lawnchair/Lawnchair.apk").Trim()
-  Write-Host "  $ins"
-  if ($ins -notmatch "Success") {
-    throw "系统 priv-app 安装失败，已中止。请改用默认用户安装模式。"
+  # 卸用户副本，避免与 system 冲突
+  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
+
+  # 旧目录清理 + 规范路径 /system/priv-app/app.lawnchair
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
+       /system/priv-app/lawnchair /system/app/lawnchair \
+       /system/priv-app/app.lawnchair /system/app/app.lawnchair
+mkdir -p /system/priv-app/app.lawnchair
+"@
+
+  Install-RecentsOverlay $AdbPath $Serial
+
+  # privapp-permissions XML
+  $xmlLocal = Join-Path $ScriptDir "privapp-permissions-app.lawnchair.xml"
+  if (-not (Test-Path -LiteralPath $xmlLocal)) {
+    $xmlLocal = Join-Path $env:TEMP "privapp-permissions-app.lawnchair.xml"
+    [System.IO.File]::WriteAllText($xmlLocal, (Get-PrivAppPermissionsXml))
+    Write-Warn "使用内置 privapp XML 写入: $xmlLocal"
   }
+  $null = Invoke-Adb $AdbPath -s $Serial push $xmlLocal /system/etc/permissions/privapp-permissions-app.lawnchair.xml
+  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml; chown root:root /system/etc/permissions/privapp-permissions-app.lawnchair.xml"
+
+  $push = (Invoke-Adb $AdbPath -s $Serial push $full /system/priv-app/app.lawnchair/app.lawnchair.apk).Trim()
+  Write-Host "  $push"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/priv-app/app.lawnchair/app.lawnchair.apk; chown root:root /system/priv-app/app.lawnchair/app.lawnchair.apk; rm -rf /system/priv-app/app.lawnchair/oat"
+
+  if (-not $SkipReboot) {
+    Write-Step "重启以使 priv-app / overlay / 权限生效（必需）"
+    Reboot-And-Reconnect $AdbPath $Serial 180
+    Ensure-Root $AdbPath $Serial
+  } else {
+    Write-Warn "SkipReboot：权限/系统标志可能未生效"
+  }
+
+  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
+  Write-Ok "pm path: $path"
+  if ($path -notmatch "/system/") {
+    # 若扫包失败，尝试 pm install 从 system 路径
+    Write-Warn "系统扫包未见 system 路径，尝试 pm install 系统路径"
+    $ins = (Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk").Trim()
+    Write-Host "  $ins"
+    $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
+  }
+  if ($path -notmatch $PackageName) {
+    throw "特权安装后未找到 $PackageName。请 -RecoverOnly 回滚用户安装。"
+  }
+
+  $flags = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName | grep -E 'pkgFlags=|privateFlags=|privatePkgFlags=' | head -4").Trim()
+  Write-Host "  $flags"
+  $grant = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName | grep 'MANAGE_ACTIVITY_TASKS: granted' | head -2").Trim()
+  Write-Host "  $grant"
+  if ($grant -notmatch "granted=true") {
+    Write-Warn "MANAGE_ACTIVITY_TASKS 仍未 granted。检查 overlay: cmd overlay list | grep lawnchair"
+  } else {
+    Write-Ok "MANAGE_ACTIVITY_TASKS granted"
+  }
+
+  $recents = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys activity recents | head -4").Trim()
+  Write-Host "  $recents"
+
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm clear $PackageName >/dev/null 2>&1"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm grant $PackageName android.permission.POST_NOTIFICATIONS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_AUDIO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_CONTACTS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+  Start-Sleep -Seconds 2
+}
+
+# 兼容旧函数名
+function Install-ForceSystem([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
+  Install-PrivilegedHome $AdbPath $Serial $ApkPath -SkipReboot:$SkipReboot
 }
 
 function Show-Status([string]$AdbPath, [string]$Serial) {
@@ -622,8 +751,18 @@ function Test-IsFallbackHome([string]$AdbPath, [string]$Serial) {
   return ($homeInfo -match "FallbackHome") -or ($focus -match "FallbackHome")
 }
 
-function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [int]$MaxTries = 2) {
+function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [int]$MaxTries = 2, [switch]$PrivilegedMode) {
   Write-Step "防卡住校验（安装后自动救援）"
+
+  if ($PrivilegedMode) {
+    # 特权安装后禁止用用户安装路径“救援”，否则会卸掉 SYSTEM 包
+    if (Show-Status $AdbPath $Serial) { return $true }
+    Write-Warn "特权安装后桌面未就绪：尝试 set-home + 拉起"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+    Start-Sleep -Seconds 2
+    return (Show-Status $AdbPath $Serial)
+  }
 
   # 第一轮：软修复（不重启）
   Write-Ok "第 1 步：软修复（不重启）"
@@ -650,9 +789,16 @@ try {
   }
 
   if (($ConnectOnly.IsPresent -and $RecoverOnly.IsPresent) -or
-      ($ConnectOnly.IsPresent -and $ForceSystemPrivApp.IsPresent) -or
-      ($RecoverOnly.IsPresent -and $ForceSystemPrivApp.IsPresent)) {
-    throw "ConnectOnly / RecoverOnly / ForceSystemPrivApp 只能选一个。查看: .\Lawnchair-MuMu.ps1 -Help"
+      ($ConnectOnly.IsPresent -and $PrivilegedInstall.IsPresent) -or
+      ($RecoverOnly.IsPresent -and $PrivilegedInstall.IsPresent) -or
+      ($UserInstallOnly.IsPresent -and $PrivilegedInstall.IsPresent) -or
+      ($UserInstallOnly.IsPresent -and $RecoverOnly.IsPresent)) {
+    throw "ConnectOnly / RecoverOnly / PrivilegedInstall / UserInstallOnly 互斥。查看: .\Lawnchair-MuMu.ps1 -Help"
+  }
+
+  # 默认走特权安装（修复点击图标未安装）；-UserInstallOnly 才用户空间
+  if (-not $ConnectOnly -and -not $RecoverOnly -and -not $UserInstallOnly -and -not $PrivilegedInstall) {
+    $PrivilegedInstall = $true
   }
 
   Write-Ok "scriptDir: $ScriptDir"
@@ -714,27 +860,10 @@ try {
     $null = Recover-FallbackHome $adb $serial $apkPath
   }
 
-  if ($ForceSystemPrivApp) {
-    Install-ForceSystem $adb $serial $apkPath
-    if (-not $SkipReboot) {
-      Write-Step "reboot（ForceSystem 模式）"
-      $null = Invoke-Adb $adb -s $serial reboot
-      Start-Sleep 8
-      $ok = $false
-      $deadline = (Get-Date).AddSeconds(120)
-      while ((Get-Date) -lt $deadline) {
-        $null = Invoke-Adb $adb connect $serial
-        if ((Invoke-Adb $adb -s $serial shell getprop sys.boot_completed).Trim() -eq "1") {
-          $ok = $true
-          break
-        }
-        Start-Sleep 3
-      }
-      if (-not $ok) {
-        Write-Warn "等待启动超时"
-      }
-    }
+  if ($PrivilegedInstall) {
+    Install-PrivilegedHome $adb $serial $apkPath -SkipReboot:$SkipReboot
   } else {
+    # UserInstallOnly / Recover 路径：用户安装（会“未安装”，仅回滚/调试）
     Ensure-Root $adb $serial
     Remove-SystemPrivAppConflict $adb $serial
     Install-UserHome $adb $serial $apkPath
@@ -748,10 +877,10 @@ try {
 
   Set-DefaultHome $adb $serial
 
-  # 关键：替换完成后强制跑防卡住流程，防止 FallbackHome 黑屏
-  $ready = Ensure-HomeReady $adb $serial $apkPath 2
+  # 替换完成后校验；特权模式勿回落用户安装
+  $ready = Ensure-HomeReady $adb $serial $apkPath 2 -PrivilegedMode:$PrivilegedInstall
   if (-not $ready) {
-    throw "安装完成但仍卡在 FallbackHome，请检查 APK 签名/包名，或手动: .\Lawnchair-MuMu.ps1 -RecoverOnly"
+    throw "安装完成但桌面未就绪。特权安装失败可回滚: .\Lawnchair-MuMu.ps1 -RecoverOnly"
   }
 
   Write-Step "完成"
@@ -759,14 +888,16 @@ try {
   Write-Host "设备: $serial" -ForegroundColor Green
   Write-Host "包名: $PackageName" -ForegroundColor Green
   Write-Host "数据: /data/user/0/$PackageName" -ForegroundColor Green
-  Write-Host ("模式: " + $(if ($ForceSystemPrivApp) { "ForceSystemPrivApp(危险)" } else { "用户安装 + 默认HOME(推荐)" })) -ForegroundColor Green
+  $modeLabel = if ($PrivilegedInstall) { "PrivilegedInstall (priv-app+recents，修复点击未安装)" } elseif ($UserInstallOnly) { "用户安装（会未安装，仅调试）" } else { "默认" }
+  Write-Host ("模式: " + $modeLabel) -ForegroundColor Green
   Write-Host "防卡住: 已自动校验/救援通过" -ForegroundColor Green
   Write-Host ""
   Write-Host "常用:" -ForegroundColor Green
-  Write-Host "  .\Lawnchair-MuMu.ps1              # 默认安装（含防卡住）"
-  Write-Host "  .\Lawnchair-MuMu.ps1 -ConnectOnly # 只连接"
-  Write-Host "  .\Lawnchair-MuMu.ps1 -RecoverOnly # 黑屏救援"
-  Write-Host "  .\Lawnchair-MuMu.ps1 -Help        # 使用说明"
+  Write-Host "  .\Lawnchair-MuMu.ps1                     # 默认=特权安装（修复未安装）"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -PrivilegedInstall  # 同上"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -RecoverOnly        # 回滚到用户安装 / 黑屏救援"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -ConnectOnly        # 只连接"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -Help"
   exit 0
 }
 catch {

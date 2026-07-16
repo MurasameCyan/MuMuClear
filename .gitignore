@@ -3,6 +3,8 @@ uploads/
 *.idsig
 lawnchair_src/
 lawnchair_apkeditor/
+build/
+diag/
 
 # optional local pulls / originals
 shared_Lawnchair.apk
