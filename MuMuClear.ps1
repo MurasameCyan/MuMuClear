@@ -455,15 +455,37 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
     }
   }
 
-  $primary = $connected |
+    # 在线实例按：配置端口优先、非 7555 代理、最近日志
+  $ranked = @($connected |
     Sort-Object `
       @{ Expression = { if ($_.Source -eq "vm_config") { 0 } else { 1 } } }, `
       @{ Expression = { if ($_.Port -ge 16384) { 0 } elseif ($_.Port -eq 7555) { 2 } else { 1 } } }, `
-      @{ Expression = { $_.LogTime }; Descending = $true } |
-    Select-Object -First 1
+      @{ Expression = { $_.LogTime }; Descending = $true })
 
+  if ($ranked.Count -eq 0) { throw "connect 失败" }
+
+  # 多个在线且未指定 -Index：必须让用户选，避免改错机（表现为「没效果」）
+  $uniqueIdx = @($ranked | Where-Object { $_.Index -ge 0 } | Select-Object -ExpandProperty Index -Unique)
+  if ($OnlyIndex -lt 0 -and $uniqueIdx.Count -gt 1) {
+    Write-Host ""
+    Write-Host "检测到多个在线实例，请用 -Index 指定要清理的多开序号：" -ForegroundColor Yellow
+    foreach ($c in $ranked) {
+      $mark = if ($c -eq $ranked[0]) { " (默认候选)" } else { "" }
+      Write-Host ("  -Index {0,-4}  {1,-22}  {2}{3}" -f $c.Index, $c.VM, $c.Serial, $mark)
+    }
+    Write-Host ""
+    Write-Host "示例: .\MuMuClear.ps1 -Index $($ranked[0].Index) -PrivilegedInstall" -ForegroundColor Cyan
+    throw "多开在线时必须指定 -Index，避免改到错误的实例"
+  }
+
+  $primary = $ranked | Select-Object -First 1
   if (-not $primary) { throw "connect 失败" }
-  Write-Ok "主设备 $($primary.Serial) Index=$($primary.Index)"
+  Write-Host ""
+  Write-Host "============================================================" -ForegroundColor Green
+  Write-Host "  将操作实例: Index=$($primary.Index)  $($primary.VM)" -ForegroundColor Green
+  Write-Host "  adb: $($primary.Serial)" -ForegroundColor Green
+  Write-Host "============================================================" -ForegroundColor Green
+  Write-Host ""
   return $primary
 }
 
@@ -1080,7 +1102,18 @@ try {
   Write-Step "当前 devices"
   Write-Host (Invoke-Adb $adb devices -l)
 
-  if ($ConnectOnly) {
+  Write-Step "安装前桌面快照（确认实例）"
+  $prePath = (Invoke-Adb $adb -s $serial shell pm path $PackageName 2>$null).Trim()
+  $preVer = (Invoke-Adb $adb -s $serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
+  $preHome = (Invoke-Adb $adb -s $serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
+  Write-Host "  设备   : $serial"
+  Write-Host "  pm path: $prePath"
+  Write-Host "  version: $preVer"
+  Write-Host "  HOME   : $preHome"
+  if ($preVer -match "15\.0\.0\.1") {
+    Write-Warn "当前是 MuMu 原版广告桌面 (15.0.0.1)，将替换为清爽版"
+  }
+if ($ConnectOnly) {
     Write-Step "完成（仅连接）"
     Write-Host ""
     Write-Host "主设备: $serial" -ForegroundColor Green
@@ -1147,6 +1180,9 @@ try {
   $modeLabel = if ($PrivilegedInstall) { "PrivilegedInstall (priv-app+recents，修复点击未安装)" } elseif ($UserInstallOnly) { "用户安装（会未安装，仅调试）" } else { "默认" }
   Write-Host ("模式: " + $modeLabel) -ForegroundColor Green
   Write-Host "防卡住: 已自动校验/救援通过" -ForegroundColor Green
+  $finalVer = (Invoke-Adb $adb -s $serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
+  Write-Host ("版本: " + $finalVer) -ForegroundColor Green
+  if ($finalVer -match '15\.0\.0\.1') { throw '完成后仍是原版 15.0.0.1，说明改错实例或系统写入未生效' }
   Write-Host ""
   Write-Host "常用:" -ForegroundColor Green
   Write-Host "  .\MuMuClear.ps1                     # 默认=特权安装（修复未安装）"
