@@ -1,0 +1,101 @@
+name: Release share zip
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag/version (e.g. v1.0.0). Leave empty to use run id."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = $env:GITHUB_REF_NAME
+          } elseif ("${{ github.event.inputs.version }}".Trim()) {
+            $v = "${{ github.event.inputs.version }}".Trim()
+          } else {
+            $v = "v0.0.${{ github.run_number }}"
+          }
+          if ($v -notmatch '^v') { $v = "v$v" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version=$v"
+
+      - name: Build MuMuClear-share.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'MuMuClear.ps1',
+            'tool\Lawnchair_app.lawnchair_signed.apk',
+            'tool\LawnchairRecentsOverlay.apk',
+            'tool\privapp-permissions-app.lawnchair.xml',
+            'tool\Adb\adb.exe',
+            'tool\Adb\AdbWinApi.dll',
+            'tool\Adb\AdbWinUsbApi.dll'
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "missing required file: $p" }
+          }
+
+          $stage = Join-Path $env:RUNNER_TEMP 'MuMuClear-share'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath 'MuMuClear.ps1' -Destination $stage
+          if (Test-Path 'Lawnchair-MuMu.ps1') {
+            Copy-Item -LiteralPath 'Lawnchair-MuMu.ps1' -Destination $stage
+          }
+          Copy-Item -LiteralPath 'tool' -Destination (Join-Path $stage 'tool') -Recurse
+
+          # Do not ship optional heavy/local-only leftovers if any sneak in
+          Get-ChildItem (Join-Path $stage 'tool') -Recurse -File |
+            Where-Object { $_.Name -match '\.idsig$|Debug|shared_Lawnchair|\.zip$' } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+          $zip = Join-Path $PWD 'MuMuClear-share.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          $item = Get-Item $zip
+          Write-Host ("zip={0} size={1}" -f $item.FullName, $item.Length)
+          if ($item.Length -lt 1MB) { throw 'zip too small' }
+
+          "name=MuMuClear-share.zip" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Create GitHub Release and upload zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: MuMuClear ${{ steps.ver.outputs.version }}
+          body: |
+            ## MuMuClear ${{ steps.ver.outputs.version }}
+
+            下载 **MuMuClear-share.zip**，解压后在 MuMu 已启动时执行：
+
+            ```powershell
+            .\MuMuClear.ps1 -PrivilegedInstall
+            ```
+
+            - 黑屏救援：`.\MuMuClear.ps1 -RecoverOnly`
+            - 仅连接：`.\MuMuClear.ps1 -ConnectOnly`
+          files: |
+            MuMuClear-share.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
