@@ -1,10 +1,13 @@
-# large local tools / caches
-APK.Tool.GUI/
+# local caches / dumps
 uploads/
 *.idsig
 lawnchair_src/
 lawnchair_apkeditor/
 
-# optional local pulls
+# optional local pulls / originals
 shared_Lawnchair.apk
 OriginalBackup*.mumudata
+Lawnchair.Debug*.apk
+
+# keep portable tools under Adb/ tracked; ignore accidental GUI leftovers
+APK.Tool.GUI/
