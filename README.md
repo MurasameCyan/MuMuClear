@@ -121,3 +121,8 @@ tool/
 - 安装过程可能再次重启模拟器，属正常
 - 数据目录：`/data/user/0/app.lawnchair`
 - 若安装后黑屏或无法回桌面：执行 `.\MuMuClear.ps1 -RecoverOnly`
+
+> **常见问题 4：装好后「从多开器完全退出再开」又恢复广告**  
+> 直接改 /system 依赖 MuMu 的 system-diff，部分实例冷启动会回滚。  
+> 当前脚本在检测到 KernelSU 时会安装 **mumu_clear 模块**（数据在 /data/adb/modules），每次启动自动挂载清爽桌面，更抗回滚。  
+> 请确认实例已开 **Root**（KernelSU 依赖 root）。

@@ -767,6 +767,110 @@ function Wait-PackagePrivileged([string]$AdbPath, [string]$Serial, [int]$Timeout
   return (Test-IsPrivilegedSystemPackage $AdbPath $Serial)
 }
 
+
+function Test-HasKernelSu([string]$AdbPath, [string]$Serial) {
+  $r = (Invoke-Adb $AdbPath -s $Serial shell "test -x /data/adb/ksud && echo YES || echo NO").Trim()
+  return ($r -match "YES")
+}
+
+function Install-KsuClearModule([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
+  # 持久化关键路径：KernelSU 模块写在 /data/adb/modules（走 data 分区），
+  # 每次启动 mount 覆盖 /system。比直接改 system-diff 更抗 MuMu 冷启动回滚。
+  Write-Step "安装 KernelSU 持久模块 mumu_clear（防重启回广告桌面）"
+  if (-not (Test-HasKernelSu $AdbPath $Serial)) {
+    Write-Warn "未检测到 /data/adb/ksud，跳过模块安装（仅依赖可写系统 system-diff）"
+    return $false
+  }
+  $full = (Resolve-Path -LiteralPath $ApkPath).Path
+  $xmlLocal = $null
+  foreach ($c in @(
+      (Join-Path $ToolDir "privapp-permissions-app.lawnchair.xml"),
+      (Join-Path $ScriptDir "privapp-permissions-app.lawnchair.xml")
+    )) {
+    if (Test-Path -LiteralPath $c) { $xmlLocal = $c; break }
+  }
+  if (-not $xmlLocal) {
+    $xmlLocal = Join-Path $env:TEMP "privapp-permissions-app.lawnchair.xml"
+    [System.IO.File]::WriteAllText($xmlLocal, (Get-PrivAppPermissionsXml))
+  }
+  $overlayLocal = $null
+  foreach ($c in @(
+      (Join-Path $ToolDir "LawnchairRecentsOverlay.apk"),
+      (Join-Path $ScriptDir "LawnchairRecentsOverlay.apk")
+    )) {
+    if (Test-Path -LiteralPath $c) { $overlayLocal = $c; break }
+  }
+
+  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /data/local/tmp/mumu_clear_mod; mkdir -p /data/local/tmp/mumu_clear_mod"
+  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_mod/Lawnchair.apk
+  $null = Invoke-Adb $AdbPath -s $Serial push $xmlLocal /data/local/tmp/mumu_clear_mod/privapp.xml
+  if ($overlayLocal) {
+    $null = Invoke-Adb $AdbPath -s $Serial push $overlayLocal /data/local/tmp/mumu_clear_mod/overlay.apk
+  }
+
+  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+set -e
+MOD=/data/adb/modules/mumu_clear
+rm -rf `$MOD
+mkdir -p `$MOD/system/priv-app/app.lawnchair
+mkdir -p `$MOD/system/priv-app/Lawnchair
+mkdir -p `$MOD/system/etc/permissions
+mkdir -p `$MOD/system/product/overlay
+mkdir -p `$MOD/product/overlay
+
+cat > `$MOD/module.prop <<'EOF'
+id=mumu_clear
+name=MuMuClear Clean Lawnchair
+version=v1.1
+versionCode=2
+author=MuMuClear
+description=Replace MuMu stock ad launcher with clean Lawnchair. Survives reboot via KernelSU module on /data.
+EOF
+
+cp /data/local/tmp/mumu_clear_mod/Lawnchair.apk `$MOD/system/priv-app/app.lawnchair/app.lawnchair.apk
+cp /data/local/tmp/mumu_clear_mod/Lawnchair.apk `$MOD/system/priv-app/Lawnchair/Lawnchair.apk
+cp /data/local/tmp/mumu_clear_mod/privapp.xml `$MOD/system/etc/permissions/privapp-permissions-app.lawnchair.xml
+if [ -f /data/local/tmp/mumu_clear_mod/overlay.apk ]; then
+  cp /data/local/tmp/mumu_clear_mod/overlay.apk `$MOD/system/product/overlay/LawnchairRecentsOverlay.apk
+  cp /data/local/tmp/mumu_clear_mod/overlay.apk `$MOD/product/overlay/LawnchairRecentsOverlay.apk
+fi
+
+cat > `$MOD/post-fs-data.sh <<'EOF'
+#!/system/bin/sh
+chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null
+chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null
+chmod 0644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml 2>/dev/null
+chmod 0644 /product/overlay/LawnchairRecentsOverlay.apk /system/product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null
+EOF
+
+cat > `$MOD/service.sh <<'EOF'
+#!/system/bin/sh
+(
+  while [ "`$(getprop sys.boot_completed)`" != "1" ]; do sleep 2; done
+  sleep 5
+  cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher >/dev/null 2>&1
+  cmd role add-role-holder android.app.role.HOME app.lawnchair >/dev/null 2>&1
+) &
+EOF
+
+chown -R root:root `$MOD
+find `$MOD -type d -exec chmod 755 {} +
+find `$MOD -type f -exec chmod 644 {} +
+chmod 755 `$MOD/post-fs-data.sh `$MOD/service.sh
+# verify apk size
+ls -la `$MOD/system/priv-app/Lawnchair/Lawnchair.apk `$MOD/system/priv-app/app.lawnchair/app.lawnchair.apk
+sync
+"@
+
+  $check = (Invoke-Adb $AdbPath -s $Serial shell "ls -la /data/adb/modules/mumu_clear/system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null; /data/adb/ksud module list 2>/dev/null | grep -A2 mumu_clear | head -8").Trim()
+  Write-Host "  $check"
+  if ($check -notmatch "Lawnchair.apk") {
+    Write-Warn "KernelSU 模块 APK 未就位"
+    return $false
+  }
+  Write-Ok "KernelSU 模块 mumu_clear 已安装（数据分区，冷启动也会挂载）"
+  return $true
+}
 function Install-SystemLawnchairApk([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
   # 关键加固：
   # 1) 目录必须 0755、APK 必须 0644。MuMu overlay 上 mkdir 常变成 0777，
@@ -828,6 +932,11 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
   Ensure-Root $AdbPath $Serial
+  # 优先装 KernelSU 模块做冷启动持久化（写 /data，不依赖 system-diff）
+  $script:KsuModuleInstalled = Install-KsuClearModule $AdbPath $Serial $full
+  if (-not $script:KsuModuleInstalled) {
+    Write-Warn "无 KernelSU 时仅依赖可写系统；从多开器完全退出再开可能回滚广告桌面"
+  }
 
   if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
     Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖系统路径"
