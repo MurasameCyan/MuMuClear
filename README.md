@@ -28,16 +28,36 @@
 
 到 [Releases](https://github.com/MurasameCyan/MuMuClear/releases) 下载 **`MuMuClear-share.zip`**，解压即可。
 
-## 使用
+## 使用教程
+
+### 1. 开启 Root 与可写系统（必做）
+
+MuMuClear 需要 **Root** 和 **可写系统**，否则无法把清爽桌面装到系统分区。
+
+1. 打开 **MuMu 模拟器**
+2. 点右上角 **三条横线菜单**（或设置入口）→ **设置**
+3. 左侧进入 **磁盘**
+4. 打开：
+   - **可写系统**（Writable system）
+   - **Root 权限**
+5. 按提示 **重启模拟器**，重启完成后再继续
+
+示意（MuMu 设置 → 磁盘）：
+
+![MuMu 开启 Root 与可写系统](docs/mumu-root-writable.png)
+
+> 若开关为灰色无法打开，请先完全退出 MuMu 再开，或新建一个 **Android 15** 实例后再设置。
+
+### 2. 运行安装脚本
 
 ```powershell
-# 1. 启动 MuMu，确认已进入 Android 15 系统
+# 1. 确认 MuMu 已进入 Android 15，且 Root / 可写系统已开启
 # 2. 解压 MuMuClear-share.zip
 # 3. 在解压目录打开 PowerShell：
 .\MuMuClear.ps1 -PrivilegedInstall
 ```
 
-按提示完成后，按 Home 应进入无广告的 Lawnchair 桌面。
+按提示完成后，按 **Home** 应进入无广告的 Lawnchair 桌面。
 
 ### 常用命令
 
@@ -67,7 +87,7 @@ tool/
 
 ## 说明
 
-- 需要 MuMu 可 adb root / 可写 system（脚本会自动处理常见情况）
-- 安装过程可能重启模拟器，属正常
+- **必须**先开启 Root + 可写系统并重启模拟器
+- 安装过程可能再次重启模拟器，属正常
 - 数据目录：`/data/user/0/app.lawnchair`
 - 若安装后黑屏或无法回桌面：执行 `.\MuMuClear.ps1 -RecoverOnly`
