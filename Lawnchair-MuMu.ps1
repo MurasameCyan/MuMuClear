@@ -194,7 +194,7 @@ function Show-Usage {
     "快速开始：",
     "  1. 启动 MuMu",
     "  2. cd 到脚本目录",
-    "  3. .\Lawnchair-MuMu.ps1",
+    "  3. .\Lawnchair-MuMu.ps1   # 安装后自动防卡住校验",
     "",
     "常用命令：",
     "  .\Lawnchair-MuMu.ps1                  # 连接+安装+默认桌面（推荐）",
@@ -212,7 +212,7 @@ function Show-Usage {
     "  -DisableStockLauncher -StockLauncher -NoProxyPorts -Help",
     "",
     "默认流程：",
-    "  自动连 MuMu -> root -> 删 priv-app 冲突 -> 用户安装 -> 设 HOME",
+    "  自动连 MuMu -> root -> 删 priv-app 冲突 -> 用户安装 -> 设 HOME -> 防卡住救援",
     "",
     "黑屏原因：",
     "  testkey 包覆盖 /system/priv-app 会导致 FallbackHome。",
@@ -499,9 +499,58 @@ function Show-Status([string]$AdbPath, [string]$Serial) {
   Write-Host "  focus   : $focus"
   if ($homeInfo -match [regex]::Escape($PackageName) -and $focus -match "LawnchairLauncher") {
     Write-Ok "桌面正常"
-  } elseif ($homeInfo -match "FallbackHome") {
-    Write-Err "仍卡在 FallbackHome -> 再跑 .\Lawnchair-MuMu.ps1 -RecoverOnly"
+    return $true
   }
+  if ($homeInfo -match "FallbackHome") {
+    Write-Warn "检测到 FallbackHome 黑屏状态"
+  } else {
+    Write-Warn "桌面尚未就绪"
+  }
+  return $false
+}
+
+function Test-IsFallbackHome([string]$AdbPath, [string]$Serial) {
+  $homeInfo = (Invoke-Adb $AdbPath -s $Serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
+  $focus = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys window | grep mCurrentFocus").Trim()
+  return ($homeInfo -match "FallbackHome") -or ($focus -match "FallbackHome")
+}
+
+function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [int]$MaxTries = 2) {
+  Write-Step "防卡住校验（安装后自动救援）"
+  for ($i = 1; $i -le $MaxTries; $i++) {
+    # 清系统冲突 + 确保用户包 + HOME + 拉起
+    Ensure-Root $AdbPath $Serial
+    Remove-SystemPrivAppConflict $AdbPath $Serial
+
+    $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
+    if ($path -notmatch "package:") {
+      Write-Warn "第 $i 次：包不存在，重新安装"
+      $full = (Resolve-Path -LiteralPath $ApkPath).Path
+      $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
+      $out = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
+      Write-Host "  $out"
+      if ($out -notmatch "Success") { throw "防卡住安装失败: $out" }
+    } else {
+      Write-Ok "第 $i 次：已有包 $path"
+    }
+
+    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "am start -n $HomeActivity"
+    Start-Sleep -Seconds 2
+    $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+    Start-Sleep -Seconds 1
+
+    if (Show-Status $AdbPath $Serial) { return $true }
+
+    if (Test-IsFallbackHome $AdbPath $Serial) {
+      Write-Warn "第 $i 次仍 FallbackHome，执行完整救援..."
+      Recover-FallbackHome $AdbPath $Serial $ApkPath
+      Start-Sleep -Seconds 1
+      if (Show-Status $AdbPath $Serial) { return $true }
+    }
+  }
+  return (Show-Status $AdbPath $Serial)
 }
 
 try {
@@ -544,17 +593,29 @@ try {
     Write-Host ""
     Write-Host "主设备: $serial" -ForegroundColor Green
     Write-Host "端口  : $($dev.Port)" -ForegroundColor Green
+    # 连接后也探测是否卡在 FallbackHome，给提示
+    if (Test-IsFallbackHome $adb $serial) {
+      Write-Warn "当前设备卡在 FallbackHome。请运行: .\Lawnchair-MuMu.ps1 -RecoverOnly"
+    }
     Write-Host ""
     Write-Host "之后可用:" -ForegroundColor Green
     Write-Host "  & `"$adb`" -s $serial shell"
-    Write-Host "  .\Lawnchair-MuMu.ps1            # 继续安装默认桌面"
-    Write-Host "  .\Lawnchair-MuMu.ps1 -Help      # 查看完整用法"
+    Write-Host "  .\Lawnchair-MuMu.ps1            # 继续安装默认桌面（含防卡住）"
+    Write-Host "  .\Lawnchair-MuMu.ps1 -RecoverOnly"
+    Write-Host "  .\Lawnchair-MuMu.ps1 -Help"
     exit 0
   }
 
   if ($RecoverOnly) {
     Recover-FallbackHome $adb $serial $apkPath
+    $null = Ensure-HomeReady $adb $serial $apkPath 2
     exit 0
+  }
+
+  # 若一上来就卡 FallbackHome，先救一次再继续安装
+  if (Test-IsFallbackHome $adb $serial) {
+    Write-Warn "连接后发现 FallbackHome，先自动救援"
+    Recover-FallbackHome $adb $serial $apkPath
   }
 
   if ($ForceSystemPrivApp) {
@@ -575,12 +636,6 @@ try {
       }
       if (-not $ok) {
         Write-Warn "等待启动超时"
-      } else {
-        $homeInfo = (Invoke-Adb $adb -s $serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
-        if ($homeInfo -match "FallbackHome") {
-          Write-Warn "检测到 FallbackHome，自动救援"
-          Recover-FallbackHome $adb $serial $apkPath
-        }
       }
     }
   } else {
@@ -596,7 +651,12 @@ try {
   }
 
   Set-DefaultHome $adb $serial
-  Show-Status $adb $serial
+
+  # 关键：替换完成后强制跑防卡住流程，防止 FallbackHome 黑屏
+  $ready = Ensure-HomeReady $adb $serial $apkPath 2
+  if (-not $ready) {
+    throw "安装完成但仍卡在 FallbackHome，请检查 APK 签名/包名，或手动: .\Lawnchair-MuMu.ps1 -RecoverOnly"
+  }
 
   Write-Step "完成"
   Write-Host ""
@@ -604,9 +664,10 @@ try {
   Write-Host "包名: $PackageName" -ForegroundColor Green
   Write-Host "数据: /data/user/0/$PackageName" -ForegroundColor Green
   Write-Host ("模式: " + $(if ($ForceSystemPrivApp) { "ForceSystemPrivApp(危险)" } else { "用户安装 + 默认HOME(推荐)" })) -ForegroundColor Green
+  Write-Host "防卡住: 已自动校验/救援通过" -ForegroundColor Green
   Write-Host ""
   Write-Host "常用:" -ForegroundColor Green
-  Write-Host "  .\Lawnchair-MuMu.ps1              # 默认安装"
+  Write-Host "  .\Lawnchair-MuMu.ps1              # 默认安装（含防卡住）"
   Write-Host "  .\Lawnchair-MuMu.ps1 -ConnectOnly # 只连接"
   Write-Host "  .\Lawnchair-MuMu.ps1 -RecoverOnly # 黑屏救援"
   Write-Host "  .\Lawnchair-MuMu.ps1 -Help        # 使用说明"
@@ -615,5 +676,6 @@ try {
 catch {
   Write-Err $_.Exception.Message
   Write-Host "  查看用法: .\Lawnchair-MuMu.ps1 -Help" -ForegroundColor Yellow
+  Write-Host "  黑屏救援: .\Lawnchair-MuMu.ps1 -RecoverOnly" -ForegroundColor Yellow
   exit 1
 }
