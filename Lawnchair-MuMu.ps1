@@ -4,33 +4,153 @@
   MuMu + Lawnchair 一键工具（连接 / 安装默认桌面 / 黑屏救援）
 
 .DESCRIPTION
-  同目录依赖：
-    <scriptDir>\Adb\adb.exe
-    <scriptDir>\Lawnchair_app.lawnchair_signed.apk
+  把改包名后的 Lawnchair（app.lawnchair）装到 MuMu，并设为默认桌面。
 
-  默认模式（推荐）：
-    1) 自动探测 MuMu ADB 端口并连接
-    2) 删除 /system/priv-app/Lawnchair 冲突
-    3) 用户安装 Lawnchair_app.lawnchair_signed.apk
-    4) 设为默认 HOME
+  ============================================================
+  目录布局（全部相对本脚本所在目录，不写死盘符）
+  ============================================================
+    <脚本目录>\
+      Lawnchair-MuMu.ps1                  # 主入口（本文件）
+      Lawnchair_app.lawnchair_signed.apk  # 改包名后的 APK
+      Adb\
+        adb.exe                           # 便携 ADB
+        AdbWinApi.dll / AdbWinUsbApi.dll  # Windows ADB 依赖
+      Replace-System-Launcher.ps1         # 旧入口，转发到本脚本
+      MuMu-Connect-And-Set-Lawnchair.ps1  # 旧入口，默认只连接
 
-  注意：testkey 重签包不要覆盖系统 priv-app，否则会 FallbackHome 黑屏。
+  ============================================================
+  快速开始
+  ============================================================
+  1. 先启动 MuMu，进入安卓系统
+  2. 在脚本目录打开 PowerShell：
+       cd <脚本目录>
+       .\Lawnchair-MuMu.ps1
+  3. 等待安装完成；按 Home 应进入 Lawnchair
+  4. 数据目录：/data/user/0/app.lawnchair
 
-.USAGE
-  # 默认：连接 + 安装 + 设默认桌面
+  若 ExecutionPolicy 拦截：
+       powershell -NoProfile -ExecutionPolicy Bypass -File .\Lawnchair-MuMu.ps1
+
+  查看本帮助：
+       .\Lawnchair-MuMu.ps1 -Help
+       Get-Help .\Lawnchair-MuMu.ps1 -Full
+
+  ============================================================
+  常用命令
+  ============================================================
+  # 默认：自动连 MuMu + 用户安装 + 设默认桌面（推荐）
   .\Lawnchair-MuMu.ps1
 
   # 只连接，不装包
   .\Lawnchair-MuMu.ps1 -ConnectOnly
 
-  # 指定多开序号
+  # 指定多开序号（看 MuMu 多开器序号，如 9 号机）
   .\Lawnchair-MuMu.ps1 -Index 9
 
-  # 黑屏救援
+  # 黑屏救援（卡在 Android 标志 / FallbackHome）
   .\Lawnchair-MuMu.ps1 -RecoverOnly
 
-  # 危险：系统 priv-app 覆盖（需签名一致）
+  # 指定 APK 文件名（相对脚本目录）
+  .\Lawnchair-MuMu.ps1 -Apk "Lawnchair_app.lawnchair_signed.apk"
+
+  # 安装后顺便禁用原系统桌面包（可选）
+  .\Lawnchair-MuMu.ps1 -DisableStockLauncher -StockLauncher com.android.launcher3
+
+  # 危险：覆盖 /system/priv-app（需与原系统签名一致；testkey 包会黑屏）
   .\Lawnchair-MuMu.ps1 -ForceSystemPrivApp
+  .\Lawnchair-MuMu.ps1 -ForceSystemPrivApp -SkipReboot
+
+  ============================================================
+  参数说明
+  ============================================================
+  -Apk                   APK 路径。相对路径相对【脚本目录】，不是当前目录。
+                         默认：Lawnchair_app.lawnchair_signed.apk
+  -PackageName           包名。默认 app.lawnchair
+  -HomeActivity          桌面 Activity。默认 app.lawnchair/.LawnchairLauncher
+  -Index                 MuMu 多开序号。-1=自动选在线实例（默认）
+  -ConnectOnly           只探测端口并 adb connect，不安装
+  -RecoverOnly           黑屏救援：删 priv-app 冲突 + 确保用户包 + 设 HOME + 拉起
+  -ForceSystemPrivApp    危险：推到 /system/priv-app/Lawnchair 并尝试系统安装
+  -SkipReboot            仅 ForceSystem 时跳过重启
+  -DisableStockLauncher  安装后禁用原桌面包（见 -StockLauncher）
+  -StockLauncher         要禁用的原桌面包名
+  -NoProxyPorts          不连 7555/55xx 代理口，只连配置文件真实端口
+  -Help                  打印使用说明后退出
+
+  ConnectOnly / RecoverOnly / ForceSystemPrivApp 三选一，不能同时开。
+
+  ============================================================
+  默认模式实际做了什么
+  ============================================================
+  1) 读 MuMu vms 配置 + 监听端口，自动 adb connect
+  2) adb root
+  3) 删除 /system/priv-app/Lawnchair（避免签名冲突）
+  4) 用户空间 install -r -g 安装 APK
+  5) cmd package set-home-activity 设默认桌面
+  6) 拉起 Lawnchair 并打印状态
+
+  ============================================================
+  为什么不要直接覆盖系统桌面
+  ============================================================
+  MuMu 原系统 Lawnchair 是官方签名。
+  本仓库 APK 是 testkey 重签。
+  用重签包覆盖 /system/priv-app 后，重启 PackageManager 扫包失败，
+  系统只剩 com.android.settings/.FallbackHome → 黑屏。
+
+  稳定方案：用户安装 + 默认 HOME。
+  数据目录仍是：/data/user/0/app.lawnchair
+
+  黑了就跑：
+       .\Lawnchair-MuMu.ps1 -RecoverOnly
+
+  ============================================================
+  连接原理（自动拿端口）
+  ============================================================
+  1) 找 MuMu 进程路径，向上找 vms 目录
+  2) 读 <vms>\MuMuPlayer-*-N\configs\vm_config.json
+     字段：vm.nat.port_forward.adb.host_port
+  3) TCP 探测端口是否在线，再 adb connect 127.0.0.1:<port>
+  4) 优先选配置端口（通常 16384+），避开 7555 代理口
+
+  ============================================================
+  装好后常用 adb
+  ============================================================
+  # 脚本会设置环境变量 MUMU_ADB_SERIAL
+  $adb = ".\Adb\adb.exe"
+  $s   = $env:MUMU_ADB_SERIAL   # 例如 127.0.0.1:16672
+
+  & $adb -s $s shell
+  & $adb -s $s shell pm path app.lawnchair
+  & $adb -s $s shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME
+
+  ============================================================
+  故障排查
+  ============================================================
+  adb devices 空白
+    -> 先开 MuMu；再 .\Lawnchair-MuMu.ps1 -ConnectOnly
+  找不到 adb.exe
+    -> 确认 <脚本目录>\Adb\adb.exe 存在
+  找不到 APK
+    -> 确认 <脚本目录>\Lawnchair_app.lawnchair_signed.apk 存在
+  安装失败 UPDATE_INCOMPATIBLE
+    -> 脚本会先 uninstall；仍失败就手动：
+       .\Adb\adb.exe -s <serial> uninstall app.lawnchair
+  黑屏 / FallbackHome
+    -> .\Lawnchair-MuMu.ps1 -RecoverOnly
+  按 Home 仍回原桌面
+    -> 再跑默认安装；或加 -DisableStockLauncher
+  ForceSystem 后黑屏
+    -> 立刻 -RecoverOnly；不要再对 testkey 包用 ForceSystem
+
+  ============================================================
+  旧脚本兼容
+  ============================================================
+  .\Replace-System-Launcher.ps1
+    -> 转发到本脚本（参数原样传递）
+
+  .\MuMu-Connect-And-Set-Lawnchair.ps1
+    -> 默认等价 -ConnectOnly
+    -> 若带 -Install 或 -SetHome，则走完整安装
 #>
 [CmdletBinding()]
 param(
@@ -44,7 +164,9 @@ param(
   [switch]$SkipReboot,
   [switch]$DisableStockLauncher,
   [string]$StockLauncher = "com.google.android.apps.nexuslauncher",
-  [switch]$NoProxyPorts
+  [switch]$NoProxyPorts,
+  [Alias("h","?")]
+  [switch]$Help
 )
 
 $ErrorActionPreference = "Continue"
@@ -58,6 +180,54 @@ function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "  [!] $m" -ForegroundColor Yellow }
 function Write-Err($m)  { Write-Host "  [X] $m" -ForegroundColor Red }
 
+function Show-Usage {
+  $lines = @(
+    "============================================================",
+    "Lawnchair-MuMu.ps1 使用说明",
+    "============================================================",
+    "",
+    "目录布局（相对脚本目录）：",
+    "  Adb\adb.exe",
+    "  Lawnchair_app.lawnchair_signed.apk",
+    "  Lawnchair-MuMu.ps1",
+    "",
+    "快速开始：",
+    "  1. 启动 MuMu",
+    "  2. cd 到脚本目录",
+    "  3. .\Lawnchair-MuMu.ps1",
+    "",
+    "常用命令：",
+    "  .\Lawnchair-MuMu.ps1                  # 连接+安装+默认桌面（推荐）",
+    "  .\Lawnchair-MuMu.ps1 -ConnectOnly     # 只连接",
+    "  .\Lawnchair-MuMu.ps1 -RecoverOnly     # 黑屏救援",
+    "  .\Lawnchair-MuMu.ps1 -Index 9         # 指定多开",
+    "  .\Lawnchair-MuMu.ps1 -Apk xxx.apk     # 指定 APK（相对脚本目录）",
+    "  .\Lawnchair-MuMu.ps1 -DisableStockLauncher",
+    "  .\Lawnchair-MuMu.ps1 -ForceSystemPrivApp   # 危险，testkey 易黑屏",
+    "  .\Lawnchair-MuMu.ps1 -Help",
+    "",
+    "参数：",
+    "  -Apk -PackageName -HomeActivity -Index",
+    "  -ConnectOnly -RecoverOnly -ForceSystemPrivApp -SkipReboot",
+    "  -DisableStockLauncher -StockLauncher -NoProxyPorts -Help",
+    "",
+    "默认流程：",
+    "  自动连 MuMu -> root -> 删 priv-app 冲突 -> 用户安装 -> 设 HOME",
+    "",
+    "黑屏原因：",
+    "  testkey 包覆盖 /system/priv-app 会导致 FallbackHome。",
+    "  默认模式用【用户安装】，稳定。数据目录 /data/user/0/app.lawnchair",
+    "",
+    "黑了就跑：",
+    "  .\Lawnchair-MuMu.ps1 -RecoverOnly",
+    "",
+    "更完整的说明写在脚本顶部注释里：",
+    "  Get-Content .\Lawnchair-MuMu.ps1 -TotalCount 160",
+    "  或 Get-Help .\Lawnchair-MuMu.ps1 -Full"
+  )
+  Write-Host ($lines -join [Environment]::NewLine) -ForegroundColor Green
+}
+
 function Resolve-ScriptPath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
   if ([IO.Path]::IsPathRooted($Path)) { return $Path }
@@ -68,7 +238,7 @@ function Find-Adb {
   foreach ($p in @((Join-Path $AdbDir "adb.exe"), (Join-Path $ScriptDir "adb.exe"))) {
     if (Test-Path -LiteralPath $p) { return (Resolve-Path -LiteralPath $p).Path }
   }
-  throw "找不到 adb.exe。请放到脚本同目录 Adb\adb.exe"
+  throw "找不到 adb.exe。请放到脚本同目录 Adb\adb.exe`n也可运行: .\Lawnchair-MuMu.ps1 -Help"
 }
 
 function Invoke-Adb {
@@ -172,7 +342,7 @@ function Test-TcpOpen([int]$Port, [int]$TimeoutMs = 400) {
 function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
   Write-Step "自动探测 MuMu 端口并连接"
   $vms = Find-MuMuVmsRoot
-  if (-not $vms) { throw "未找到 MuMu vms 目录" }
+  if (-not $vms) { throw "未找到 MuMu vms 目录。先启动 MuMu，或查看: .\Lawnchair-MuMu.ps1 -Help" }
   Write-Ok "vms: $vms"
 
   $cfgPorts = @(Get-ConfigPorts -VmsRoot $vms -OnlyIndex $OnlyIndex)
@@ -274,7 +444,7 @@ function Set-DefaultHome([string]$AdbPath, [string]$Serial) {
   $resolved = (Invoke-Adb $AdbPath -s $Serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
   Write-Host "  HOME: $resolved"
   if ($resolved -match [regex]::Escape($PackageName)) { Write-Ok "已是默认桌面" }
-  else { Write-Warn "若未切换成功，请在模拟器弹窗选择 Lawnchair → 始终" }
+  else { Write-Warn "若未切换成功，请在模拟器弹窗选择 Lawnchair -> 始终" }
 }
 
 function Recover-FallbackHome([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
@@ -330,15 +500,20 @@ function Show-Status([string]$AdbPath, [string]$Serial) {
   if ($homeInfo -match [regex]::Escape($PackageName) -and $focus -match "LawnchairLauncher") {
     Write-Ok "桌面正常"
   } elseif ($homeInfo -match "FallbackHome") {
-    Write-Err "仍卡在 FallbackHome"
+    Write-Err "仍卡在 FallbackHome -> 再跑 .\Lawnchair-MuMu.ps1 -RecoverOnly"
   }
 }
 
 try {
+  if ($Help) {
+    Show-Usage
+    exit 0
+  }
+
   if (($ConnectOnly.IsPresent -and $RecoverOnly.IsPresent) -or
       ($ConnectOnly.IsPresent -and $ForceSystemPrivApp.IsPresent) -or
       ($RecoverOnly.IsPresent -and $ForceSystemPrivApp.IsPresent)) {
-    throw "ConnectOnly / RecoverOnly / ForceSystemPrivApp 只能选一个"
+    throw "ConnectOnly / RecoverOnly / ForceSystemPrivApp 只能选一个。查看: .\Lawnchair-MuMu.ps1 -Help"
   }
 
   Write-Ok "scriptDir: $ScriptDir"
@@ -350,7 +525,7 @@ try {
   $apkPath = Resolve-ScriptPath $Apk
   if (-not $ConnectOnly) {
     if (-not (Test-Path -LiteralPath $apkPath)) {
-      throw "APK 不存在: $apkPath`n请把 APK 放在脚本同目录，默认名 Lawnchair_app.lawnchair_signed.apk"
+      throw "APK 不存在: $apkPath`n请把 APK 放在脚本同目录，默认名 Lawnchair_app.lawnchair_signed.apk`n查看: .\Lawnchair-MuMu.ps1 -Help"
     }
     Write-Ok "apk: $apkPath"
   }
@@ -366,15 +541,14 @@ try {
 
   if ($ConnectOnly) {
     Write-Step "完成（仅连接）"
-    Write-Host @"
-
-主设备: $serial
-端口  : $($dev.Port)
-
-之后可用:
-  & "$adb" -s $serial shell
-
-"@ -ForegroundColor Green
+    Write-Host ""
+    Write-Host "主设备: $serial" -ForegroundColor Green
+    Write-Host "端口  : $($dev.Port)" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "之后可用:" -ForegroundColor Green
+    Write-Host "  & `"$adb`" -s $serial shell"
+    Write-Host "  .\Lawnchair-MuMu.ps1            # 继续安装默认桌面"
+    Write-Host "  .\Lawnchair-MuMu.ps1 -Help      # 查看完整用法"
     exit 0
   }
 
@@ -410,7 +584,6 @@ try {
       }
     }
   } else {
-    # 默认推荐：用户安装 + 默认 HOME
     Ensure-Root $adb $serial
     Remove-SystemPrivAppConflict $adb $serial
     Install-UserHome $adb $serial $apkPath
@@ -426,22 +599,21 @@ try {
   Show-Status $adb $serial
 
   Write-Step "完成"
-  Write-Host @"
-
-设备: $serial
-包名: $PackageName
-数据: /data/user/0/$PackageName
-模式: $(if ($ForceSystemPrivApp) { 'ForceSystemPrivApp(危险)' } else { '用户安装 + 默认HOME(推荐)' })
-
-常用:
-  .\Lawnchair-MuMu.ps1              # 默认安装
-  .\Lawnchair-MuMu.ps1 -ConnectOnly # 只连接
-  .\Lawnchair-MuMu.ps1 -RecoverOnly # 黑屏救援
-
-"@ -ForegroundColor Green
+  Write-Host ""
+  Write-Host "设备: $serial" -ForegroundColor Green
+  Write-Host "包名: $PackageName" -ForegroundColor Green
+  Write-Host "数据: /data/user/0/$PackageName" -ForegroundColor Green
+  Write-Host ("模式: " + $(if ($ForceSystemPrivApp) { "ForceSystemPrivApp(危险)" } else { "用户安装 + 默认HOME(推荐)" })) -ForegroundColor Green
+  Write-Host ""
+  Write-Host "常用:" -ForegroundColor Green
+  Write-Host "  .\Lawnchair-MuMu.ps1              # 默认安装"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -ConnectOnly # 只连接"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -RecoverOnly # 黑屏救援"
+  Write-Host "  .\Lawnchair-MuMu.ps1 -Help        # 使用说明"
   exit 0
 }
 catch {
   Write-Err $_.Exception.Message
+  Write-Host "  查看用法: .\Lawnchair-MuMu.ps1 -Help" -ForegroundColor Yellow
   exit 1
 }
