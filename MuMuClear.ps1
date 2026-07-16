@@ -10,13 +10,11 @@
   目录布局（全部相对本脚本所在目录，不写死盘符）
   ============================================================
     <脚本目录>\
-      MuMuClear.ps1                       # 主入口（本文件）
+      MuMuClear.ps1                       # 主入口（本文件，唯一脚本）
       tool\                               # 可分享交付物（打包: MuMuClear.ps1 + tool\）
         Lawnchair_app.lawnchair_signed.apk
         LawnchairRecentsOverlay.apk
         privapp-permissions-app.lawnchair.xml
-        Replace-System-Launcher.ps1       # 兼容旧入口
-        MuMu-Connect-And-Set-Lawnchair.ps1
         Adb\
           adb.exe
           AdbWinApi.dll / AdbWinUsbApi.dll
@@ -180,15 +178,6 @@
        ENABLE_TASKBAR_NAVBAR_UNIFICATION；再 -PrivilegedInstall 或
        覆盖 /system/priv-app/app.lawnchair/app.lawnchair.apk 后 reboot
 
-  ============================================================
-  旧脚本兼容
-  ============================================================
-  .\tool\Replace-System-Launcher.ps1
-    -> 转发到本脚本（参数原样传递）
-
-  .\tool\MuMu-Connect-And-Set-Lawnchair.ps1
-    -> 默认等价 -ConnectOnly
-    -> 若带 -Install 或 -SetHome，则走完整安装
 #>
 [CmdletBinding()]
 param(
@@ -229,12 +218,11 @@ function Show-Usage {
     "============================================================",
     "",
     "目录布局（相对脚本目录）：",
-    "  MuMuClear.ps1                 # 主入口",
+    "  MuMuClear.ps1                 # 唯一脚本入口",
     "  tool\Lawnchair_app.lawnchair_signed.apk",
     "  tool\LawnchairRecentsOverlay.apk",
     "  tool\privapp-permissions-app.lawnchair.xml",
     "  tool\Adb\adb.exe                   # 便携 adb",
-    "  tool\Replace-System-Launcher.ps1   # 兼容旧入口",
     "  local\ / devtools\                 # 本地/开发，勿分享",
     "",
     "快速开始：",

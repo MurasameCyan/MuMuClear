@@ -57,10 +57,11 @@ jobs:
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item -LiteralPath 'MuMuClear.ps1' -Destination $stage
-          if (Test-Path 'Lawnchair-MuMu.ps1') {
-            Copy-Item -LiteralPath 'Lawnchair-MuMu.ps1' -Destination $stage
-          }
           Copy-Item -LiteralPath 'tool' -Destination (Join-Path $stage 'tool') -Recurse
+
+          # tool/ 仅资源，不应再含任何 .ps1
+          Get-ChildItem (Join-Path $stage 'tool') -Recurse -File -Filter '*.ps1' |
+            Remove-Item -Force -ErrorAction SilentlyContinue
 
           # Do not ship optional heavy/local-only leftovers if any sneak in
           Get-ChildItem (Join-Path $stage 'tool') -Recurse -File |

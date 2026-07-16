@@ -28,14 +28,12 @@ MuMu 模拟器一键安装清爽桌面（Lawnchair）。
 ## 目录结构（分享包）
 
 ```text
-MuMuClear.ps1                 # 主入口
+MuMuClear.ps1                 # 唯一脚本入口
 tool/
   Lawnchair_app.lawnchair_signed.apk
   LawnchairRecentsOverlay.apk
   privapp-permissions-app.lawnchair.xml
   Adb/adb.exe (+ dll)
-  Replace-System-Launcher.ps1
-  MuMu-Connect-And-Set-Lawnchair.ps1
 ```
 
 ## 开发 / 本地打包
@@ -48,12 +46,6 @@ Compress-Archive -Path .\MuMuClear.ps1, .\tool -DestinationPath .\MuMuClear-shar
 打 tag 会触发 Actions，自动构建 zip 并发布到 Releases：
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
-
-## 兼容旧入口
-
-- `Lawnchair-MuMu.ps1` → 转发到 `MuMuClear.ps1`
-- `tool\Replace-System-Launcher.ps1`
-- `tool\MuMu-Connect-And-Set-Lawnchair.ps1`
