@@ -5,11 +5,13 @@ lawnchair_src/
 lawnchair_apkeditor/
 build/
 diag/
+local/
+APK.Tool.GUI/
 
-# optional local pulls / originals
+# optional local pulls / originals (if ever appear at root)
 shared_Lawnchair.apk
 OriginalBackup*.mumudata
 Lawnchair.Debug*.apk
+*.zip
 
-# keep portable tools under Adb/ tracked; ignore accidental GUI leftovers
-APK.Tool.GUI/
+# devtools is tracked (signing/smali tools) but not required for end-user share

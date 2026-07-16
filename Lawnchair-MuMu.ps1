@@ -10,13 +10,19 @@
   目录布局（全部相对本脚本所在目录，不写死盘符）
   ============================================================
     <脚本目录>\
-      Lawnchair-MuMu.ps1                  # 主入口（本文件）
-      Lawnchair_app.lawnchair_signed.apk  # 改包名后的 APK
-      Adb\
-        adb.exe                           # 便携 ADB
-        AdbWinApi.dll / AdbWinUsbApi.dll  # Windows ADB 依赖
-      Replace-System-Launcher.ps1         # 旧入口，转发到本脚本
-      MuMu-Connect-And-Set-Lawnchair.ps1  # 旧入口，默认只连接
+      Lawnchair-MuMu.ps1                  # 主入口（本文件，唯一根目录脚本）
+      tool\                               # 可分享交付物（打包只打这个目录+主入口）
+        Lawnchair_app.lawnchair_signed.apk
+        LawnchairRecentsOverlay.apk
+        privapp-permissions-app.lawnchair.xml
+        Replace-System-Launcher.ps1       # 兼容旧入口
+        MuMu-Connect-And-Set-Lawnchair.ps1
+        Adb\
+          adb.exe
+          AdbWinApi.dll / AdbWinUsbApi.dll
+      local\                              # 本地源包/补丁脚本/分享 zip（不分享）
+      devtools\                           # 改包/签名工具（不分享）
+      build\ diag\ uploads\               # 本地缓存（不分享）
 
   ============================================================
   快速开始
@@ -51,7 +57,7 @@
   .\Lawnchair-MuMu.ps1 -RecoverOnly
 
   # 指定 APK 文件名（相对脚本目录）
-  .\Lawnchair-MuMu.ps1 -Apk "Lawnchair_app.lawnchair_signed.apk"
+  .\Lawnchair-MuMu.ps1 -Apk "tool\Lawnchair_app.lawnchair_signed.apk"
 
   # 安装后顺便禁用原系统桌面包（可选）
   .\Lawnchair-MuMu.ps1 -DisableStockLauncher -StockLauncher com.android.launcher3
@@ -65,7 +71,7 @@
   参数说明
   ============================================================
   -Apk                   APK 路径。相对路径相对【脚本目录】，不是当前目录。
-                         默认：Lawnchair_app.lawnchair_signed.apk
+                         默认：tool\Lawnchair_app.lawnchair_signed.apk
   -PackageName           包名。默认 app.lawnchair
   -HomeActivity          桌面 Activity。默认 app.lawnchair/.LawnchairLauncher
   -Index                 MuMu 多开序号。-1=自动选在线实例（默认）
@@ -116,10 +122,10 @@
   "No layoutter found"，TouchInteractionService 起不来，
   焦点常卡在 NotificationShade。
 
-  交付 APK（Lawnchair_app.lawnchair_signed.apk）已对 classes.dex
+  交付 APK（tool\Lawnchair_app.lawnchair_signed.apk）已对 classes.dex
   做同尺寸二进制补丁：把 FeatureFlags.<clinit> 里
   const/4 v1,1 改为 const/4 v1,0（关闭 unification）。
-  重建：python binpatch_unification_flag.py
+  重建：python local\binpatch_unification_flag.py
   然后 zipalign + apksigner（testkey）。
   勿用 smali 整包重编：会出 DEX041，ART 报 Header size 112/120。
 
@@ -144,7 +150,7 @@
   装好后常用 adb
   ============================================================
   # 脚本会设置环境变量 MUMU_ADB_SERIAL
-  $adb = ".\Adb\adb.exe"
+  $adb = ".\tool\Adb\adb.exe"
   $s   = $env:MUMU_ADB_SERIAL   # 例如 127.0.0.1:16672
 
   & $adb -s $s shell
@@ -157,12 +163,12 @@
   adb devices 空白
     -> 先开 MuMu；再 .\Lawnchair-MuMu.ps1 -ConnectOnly
   找不到 adb.exe
-    -> 确认 <脚本目录>\Adb\adb.exe 存在
+    -> 确认 <脚本目录>\tool\Adb\adb.exe 存在
   找不到 APK
-    -> 确认 <脚本目录>\Lawnchair_app.lawnchair_signed.apk 存在
+    -> 确认 <脚本目录>\tool\Lawnchair_app.lawnchair_signed.apk 存在
   安装失败 UPDATE_INCOMPATIBLE
     -> 脚本会先 uninstall；仍失败就手动：
-       .\Adb\adb.exe -s <serial> uninstall app.lawnchair
+       .\tool\Adb\adb.exe -s <serial> uninstall app.lawnchair
   黑屏 / FallbackHome
     -> .\Lawnchair-MuMu.ps1 -RecoverOnly
   按 Home 仍回原桌面
@@ -170,23 +176,23 @@
   ForceSystem 后黑屏
     -> 立刻 -RecoverOnly；不要再对 testkey 包用 ForceSystem
   No layoutter found / 桌面起不来（TouchInteractionService）
-    -> 确认 APK 已用 binpatch_unification_flag.py 关闭
+    -> 确认 APK 已用 local\binpatch_unification_flag.py 关闭
        ENABLE_TASKBAR_NAVBAR_UNIFICATION；再 -PrivilegedInstall 或
        覆盖 /system/priv-app/app.lawnchair/app.lawnchair.apk 后 reboot
 
   ============================================================
   旧脚本兼容
   ============================================================
-  .\Replace-System-Launcher.ps1
+  .\tool\Replace-System-Launcher.ps1
     -> 转发到本脚本（参数原样传递）
 
-  .\MuMu-Connect-And-Set-Lawnchair.ps1
+  .\tool\MuMu-Connect-And-Set-Lawnchair.ps1
     -> 默认等价 -ConnectOnly
     -> 若带 -Install 或 -SetHome，则走完整安装
 #>
 [CmdletBinding()]
 param(
-  [string]$Apk = "Lawnchair_app.lawnchair_signed.apk",
+  [string]$Apk = "tool\Lawnchair_app.lawnchair_signed.apk",
   [string]$PackageName = "app.lawnchair",
   [string]$HomeActivity = "app.lawnchair/.LawnchairLauncher",
   [string]$RecentsActivity = "app.lawnchair/com.android.quickstep.RecentsActivity",
@@ -208,7 +214,8 @@ $ErrorActionPreference = "Continue"
 $Host.UI.RawUI.WindowTitle = "Lawnchair MuMu"
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$AdbDir = Join-Path $ScriptDir "Adb"
+$ToolDir = Join-Path $ScriptDir "tool"
+$AdbDir = Join-Path $ToolDir "Adb"
 
 function Write-Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
@@ -222,9 +229,13 @@ function Show-Usage {
     "============================================================",
     "",
     "目录布局（相对脚本目录）：",
-    "  Adb\adb.exe",
-    "  Lawnchair_app.lawnchair_signed.apk",
-    "  Lawnchair-MuMu.ps1",
+    "  Lawnchair-MuMu.ps1                 # 主入口",
+    "  tool\Lawnchair_app.lawnchair_signed.apk",
+    "  tool\LawnchairRecentsOverlay.apk",
+    "  tool\privapp-permissions-app.lawnchair.xml",
+    "  tool\Adb\adb.exe                   # 便携 adb",
+    "  tool\Replace-System-Launcher.ps1   # 兼容旧入口",
+    "  local\ / devtools\                 # 本地/开发，勿分享",
     "",
     "快速开始：",
     "  1. 启动 MuMu",
@@ -266,14 +277,39 @@ function Show-Usage {
 function Resolve-ScriptPath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
   if ([IO.Path]::IsPathRooted($Path)) { return $Path }
-  return [IO.Path]::GetFullPath((Join-Path $ScriptDir $Path))
+
+  $leaf = [IO.Path]::GetFileName($Path)
+  $candidates = New-Object System.Collections.Generic.List[string]
+
+  # 1) as given under script dir (supports tool\xxx.apk)
+  [void]$candidates.Add((Join-Path $ScriptDir $Path))
+  # 2) bare name under tool\
+  [void]$candidates.Add((Join-Path $ToolDir $leaf))
+  # 3) bare name under script root (legacy flat layout)
+  [void]$candidates.Add((Join-Path $ScriptDir $leaf))
+  # 4) if path is not already tool\..., also try tool\ + original relative path
+  if ($Path -notmatch '(?i)^tool[\\/]') {
+    [void]$candidates.Add((Join-Path $ToolDir $Path))
+  }
+
+  foreach ($c in $candidates) {
+    $full = [IO.Path]::GetFullPath($c)
+    if (Test-Path -LiteralPath $full) { return $full }
+  }
+
+  # Prefer tool\leaf in error path
+  return [IO.Path]::GetFullPath((Join-Path $ToolDir $leaf))
 }
 
 function Find-Adb {
-  foreach ($p in @((Join-Path $AdbDir "adb.exe"), (Join-Path $ScriptDir "adb.exe"))) {
+  foreach ($p in @(
+      (Join-Path $AdbDir "adb.exe"),
+      (Join-Path (Join-Path $ScriptDir "Adb") "adb.exe"),
+      (Join-Path $ScriptDir "adb.exe")
+    )) {
     if (Test-Path -LiteralPath $p) { return (Resolve-Path -LiteralPath $p).Path }
   }
-  throw "找不到 adb.exe。请放到脚本同目录 Adb\adb.exe`n也可运行: .\Lawnchair-MuMu.ps1 -Help"
+  throw "找不到 adb.exe。请放到 tool\Adb\adb.exe`n也可运行: .\Lawnchair-MuMu.ps1 -Help"
 }
 
 function Invoke-Adb {
@@ -646,9 +682,15 @@ function Get-PrivAppPermissionsXml {
 
 function Install-RecentsOverlay([string]$AdbPath, [string]$Serial) {
   Write-Step "安装 recents overlay (config_recentsComponentName)"
-  $overlayLocal = Join-Path $ScriptDir "LawnchairRecentsOverlay.apk"
-  if (-not (Test-Path -LiteralPath $overlayLocal)) {
-    throw "缺少 LawnchairRecentsOverlay.apk（应与脚本同目录）。该 RRO 把 Lawnchair 标为 recents 组件。"
+  $overlayLocal = $null
+  foreach ($c in @(
+      (Join-Path $ToolDir "LawnchairRecentsOverlay.apk"),
+      (Join-Path $ScriptDir "LawnchairRecentsOverlay.apk")
+    )) {
+    if (Test-Path -LiteralPath $c) { $overlayLocal = $c; break }
+  }
+  if (-not $overlayLocal) {
+    throw "缺少 LawnchairRecentsOverlay.apk（应放在 tool\）。该 RRO 把 Lawnchair 标为 recents 组件。"
   }
   $full = (Resolve-Path -LiteralPath $overlayLocal).Path
   $null = Invoke-Adb $AdbPath -s $Serial shell "mkdir -p /product/overlay /system/product/overlay"
@@ -691,8 +733,14 @@ mkdir -p /system/priv-app/app.lawnchair
   Install-RecentsOverlay $AdbPath $Serial
 
   # privapp-permissions XML
-  $xmlLocal = Join-Path $ScriptDir "privapp-permissions-app.lawnchair.xml"
-  if (-not (Test-Path -LiteralPath $xmlLocal)) {
+  $xmlLocal = $null
+  foreach ($c in @(
+      (Join-Path $ToolDir "privapp-permissions-app.lawnchair.xml"),
+      (Join-Path $ScriptDir "privapp-permissions-app.lawnchair.xml")
+    )) {
+    if (Test-Path -LiteralPath $c) { $xmlLocal = $c; break }
+  }
+  if (-not $xmlLocal) {
     $xmlLocal = Join-Path $env:TEMP "privapp-permissions-app.lawnchair.xml"
     [System.IO.File]::WriteAllText($xmlLocal, (Get-PrivAppPermissionsXml))
     Write-Warn "使用内置 privapp XML 写入: $xmlLocal"
@@ -828,6 +876,7 @@ try {
   }
 
   Write-Ok "scriptDir: $ScriptDir"
+  Write-Ok "toolDir  : $ToolDir"
   Write-Ok "adbDir   : $AdbDir"
 
   $adb = Find-Adb
@@ -836,7 +885,7 @@ try {
   $apkPath = Resolve-ScriptPath $Apk
   if (-not $ConnectOnly) {
     if (-not (Test-Path -LiteralPath $apkPath)) {
-      throw "APK 不存在: $apkPath`n请把 APK 放在脚本同目录，默认名 Lawnchair_app.lawnchair_signed.apk`n查看: .\Lawnchair-MuMu.ps1 -Help"
+      throw "APK 不存在: $apkPath`n请把 APK 放在 tool\，默认名 tool\Lawnchair_app.lawnchair_signed.apk`n查看: .\Lawnchair-MuMu.ps1 -Help"
     }
     Write-Ok "apk: $apkPath"
   }
