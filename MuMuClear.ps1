@@ -735,55 +735,90 @@ function Test-IsPrivilegedSystemPackage([string]$AdbPath, [string]$Serial) {
   return $true
 }
 
+function Wait-PackagePrivileged([string]$AdbPath, [string]$Serial, [int]$TimeoutSec = 60) {
+  # 重启后 PM 扫包/授权有延迟，轮询而不是立刻判失败
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-IsPrivilegedSystemPackage $AdbPath $Serial) { return $true }
+    Start-Sleep -Seconds 3
+  }
+  return (Test-IsPrivilegedSystemPackage $AdbPath $Serial)
+}
+
 function Install-SystemLawnchairApk([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
-  # MuMu 原版路径 /system/priv-app/Lawnchair/Lawnchair.apk 与规范路径都要写清爽 APK。
-  # 注意：这里只落盘，不 pm install 用户包。必须重启后由 PackageManager 扫成 SYSTEM+PRIVILEGED。
+  # 关键加固：
+  # 1) 目录必须 0755、APK 必须 0644。MuMu overlay 上 mkdir 常变成 0777，
+  #    PackageManager 会跳过 world-writable 的 priv-app → 黑屏 FallbackHome。
+  # 2) 规范路径 /system/priv-app/app.lawnchair 为主；同时删除/覆盖原版
+  #    /system/priv-app/Lawnchair，防止广告桌面回退。
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
+  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_lawnchair.apk
   $null = Invoke-Adb $AdbPath -s $Serial shell @"
+umask 022
+set -e
+# 清掉所有可能冲突路径
 rm -rf /system/priv-app/Lawnchair /system/app/Lawnchair \
        /system/priv-app/lawnchair /system/app/lawnchair \
        /system/priv-app/app.lawnchair /system/app/app.lawnchair \
        /product/priv-app/Lawnchair /product/priv-app/app.lawnchair \
        /system_ext/priv-app/Lawnchair /system_ext/priv-app/app.lawnchair
-mkdir -p /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
-"@
-  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_lawnchair.apk
-  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+
+# 主路径：包名目录（PM 稳定扫到）
+mkdir -p /system/priv-app/app.lawnchair
 cp /data/local/tmp/mumu_clear_lawnchair.apk /system/priv-app/app.lawnchair/app.lawnchair.apk
+# 原版路径也写一份清爽 APK（防止 lower 层/回退扫到广告包）
+mkdir -p /system/priv-app/Lawnchair
 cp /data/local/tmp/mumu_clear_lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
-chmod 755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
-chmod 644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+
+# 强制安全权限（绝不能 777/666）
+chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
+chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
 chown root:root /system/priv-app/app.lawnchair /system/priv-app/app.lawnchair/app.lawnchair.apk \
                  /system/priv-app/Lawnchair /system/priv-app/Lawnchair/Lawnchair.apk
+# 二次强制（部分 overlay 会改回宽权限）
+chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair
+chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
 rm -rf /system/priv-app/app.lawnchair/oat /system/priv-app/Lawnchair/oat
-rm -rf /data/system/package_cache/*/*[Ll]awnchair* /data/system/package_cache/*/*lawnchair* 2>/dev/null
+rm -rf /data/system/package_cache/*/*[Ll]awnchair* /data/system/package_cache/*/*lawnchair* 2>/dev/null || true
 sync
-ls -la /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+ls -la /system/priv-app/app.lawnchair/ /system/priv-app/Lawnchair/
 "@
-  Write-Ok "已写入系统路径: /system/priv-app/app.lawnchair + /system/priv-app/Lawnchair（待重启扫包）"
+  # 校验权限：若仍是 world-writable，立刻报错而不是带着隐患重启
+  $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair; ls -l /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk").Trim()
+  Write-Host "  $ls"
+  if ($ls -match "drwxrwxrwx|rw-rw-rw-") {
+    Write-Warn "检测到 world-writable 权限，再次强制 chmod"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair; chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk"
+    $ls2 = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair").Trim()
+    Write-Host "  retry: $ls2"
+    if ($ls2 -match "drwxrwxrwx") {
+      throw "无法把 priv-app 目录权限设为 0755（仍是 0777）。PackageManager 会跳过该目录导致黑屏。请确认可写系统已开。"
+    }
+  }
+  Write-Ok "系统路径已写入且权限安全（0755/0644）"
 }
 
 function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
   Write-Step "特权安装: priv-app + privapp-permissions + recents overlay"
   Write-Host "  目标: SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS（否则点图标「未安装该应用」）" -ForegroundColor DarkGray
-  Write-Host "  并覆盖 MuMu 原版 /system/priv-app/Lawnchair，避免重启回广告桌面" -ForegroundColor DarkGray
+  Write-Host "  权限: priv-app 目录必须 0755（禁止 0777，否则重启后扫包失败→黑屏）" -ForegroundColor DarkGray
   if (-not (Test-Path -LiteralPath $ApkPath)) { throw "APK 不存在: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
   Ensure-Root $AdbPath $Serial
 
   if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
-    Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖 /system/priv-app/Lawnchair"
+    Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖系统路径"
   }
 
-  # 必须先卸掉用户副本。若只做用户安装，会没有 PRIVILEGED → 点图标「未安装该应用」
   Write-Step "移除用户版 app.lawnchair（避免盖住 system 特权包）"
   $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /data/app/*app.lawnchair* /data/app/*lawnchair* /data/user/0/$PackageName /data/user_de/0/$PackageName /data/data/$PackageName 2>/dev/null"
 
   Install-RecentsOverlay $AdbPath $Serial
+  # overlay 也强制安全权限
+  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0644 /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null; chown root:root /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null"
 
-  # privapp-permissions XML
   $xmlLocal = $null
   foreach ($c in @(
       (Join-Path $ToolDir "privapp-permissions-app.lawnchair.xml"),
@@ -797,28 +832,30 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
     Write-Warn "使用内置 privapp XML 写入: $xmlLocal"
   }
   $null = Invoke-Adb $AdbPath -s $Serial push $xmlLocal /system/etc/permissions/privapp-permissions-app.lawnchair.xml
-  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml; chown root:root /system/etc/permissions/privapp-permissions-app.lawnchair.xml"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml; chown root:root /system/etc/permissions/privapp-permissions-app.lawnchair.xml"
 
   Install-SystemLawnchairApk $AdbPath $Serial $full
 
   if ($SkipReboot) {
     Write-Warn "SkipReboot：系统扫包/权限几乎一定不会生效，点图标可能仍显示未安装"
   } else {
-    Write-Step "重启以使 PackageManager 将 priv-app 扫成 SYSTEM+PRIVILEGED（必需）"
+    Write-Step "重启以使 PackageManager 扫成 SYSTEM+PRIVILEGED（必需）"
     Reboot-And-Reconnect $AdbPath $Serial 180
     Ensure-Root $AdbPath $Serial
   }
 
-  # 重启后校验；失败则再落盘 + 再重启一次（不要退回纯用户安装）
-  $ok = Test-IsPrivilegedSystemPackage $AdbPath $Serial
+  Write-Step "等待 PackageManager 扫包并授权"
+  $ok = Wait-PackagePrivileged $AdbPath $Serial 45
   if (-not $ok -and -not $SkipReboot) {
-    Write-Warn "重启后仍未获得 SYSTEM+PRIVILEGED，二次覆盖并再重启"
+    Write-Warn "重启后仍未获得 SYSTEM+PRIVILEGED，检查权限并二次覆盖"
+    $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null; ls -l /system/priv-app/app.lawnchair/*.apk /system/priv-app/Lawnchair/*.apk 2>/dev/null").Trim()
+    Write-Host "  $ls"
     Install-SystemLawnchairApk $AdbPath $Serial $full
-    # 尝试从 system 路径触发扫描（不走 adb install 用户空间）
-    $null = Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk >/dev/null 2>&1; pm install -r -g -d /system/priv-app/Lawnchair/Lawnchair.apk >/dev/null 2>&1"
+    # 尝试触发扫描
+    $null = Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk >/dev/null 2>&1"
     Reboot-And-Reconnect $AdbPath $Serial 180
     Ensure-Root $AdbPath $Serial
-    $ok = Test-IsPrivilegedSystemPackage $AdbPath $Serial
+    $ok = Wait-PackagePrivileged $AdbPath $Serial 60
   }
 
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
@@ -829,14 +866,21 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   Write-Host "  $grant"
 
   if (-not $ok) {
+    # 最后兜底：若 system 文件在但 PM 未扫到，不要留下 FallbackHome；先用户安装保证能进桌面，并明确警告
+    Write-Warn "特权扫包失败，临时用户安装以脱离黑屏（点图标可能仍未安装，需再跑 PrivilegedInstall）"
+    $null = Invoke-Adb $AdbPath -s $Serial install -r -g $full
+    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity; am start -a android.intent.action.MAIN -c android.intent.category.HOME"
     throw @"
 特权安装失败：app.lawnchair 没有 SYSTEM+PRIVILEGED 或 MANAGE_ACTIVITY_TASKS 未授予。
-这会导致点击图标弹出「未安装该应用」。
+这会导致点击图标弹出「未安装该应用」，或重启后 FallbackHome 黑屏。
 
-请确认：
-  1) MuMu 设置 → 磁盘 → 可写系统 + Root 已开，并完整重启过模拟器
-  2) 不要用 -SkipReboot
-  3) 再跑: .\MuMuClear.ps1 -PrivilegedInstall
+常见原因：
+  - priv-app 目录权限变成 0777（world-writable），PackageManager 跳过扫包
+  - 未开启「可写系统」
+  - 使用了 -SkipReboot
+
+请确认可写系统+Root 后重跑：
+  .\MuMuClear.ps1 -PrivilegedInstall
 
 pm path: $path
 flags  : $flags
@@ -849,13 +893,13 @@ grant  : $grant
     throw "安装后仍检测到 MuMu 原版广告桌面组件。请确认可写系统已生效后重试。"
   }
 
-  # 系统特权包就绪后，再做同签名用户更新（UPDATED_SYSTEM_APP），保留特权且 HOME 更稳
+  # 可选：同签名用户更新。若破坏特权则回滚
   Write-Step "同签名用户更新（保留 SYSTEM/PRIVILEGED）"
   $upd = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
   Write-Host "  $upd"
   if ($upd -match "Success") {
     if (-not (Test-IsPrivilegedSystemPackage $AdbPath $Serial)) {
-      Write-Warn "用户更新后特权标志异常，移除用户更新并保留纯 system 包"
+      Write-Warn "用户更新后特权异常，卸载用户更新，保留纯 system 包"
       $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
     } else {
       Write-Ok "UPDATED_SYSTEM_APP 且特权仍在"
@@ -872,11 +916,17 @@ grant  : $grant
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
   $null = Invoke-Adb $AdbPath -s $Serial shell "cmd role add-role-holder android.app.role.HOME $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "am force-stop $PackageName"
-  # 注意：不要 pm clear 掉刚装好的数据除非必要；首次可 clear
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm clear $PackageName >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "pm grant $PackageName android.permission.POST_NOTIFICATIONS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_MEDIA_AUDIO >/dev/null 2>&1; pm grant $PackageName android.permission.READ_CONTACTS >/dev/null 2>&1; pm grant $PackageName android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1"
   $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
   Start-Sleep -Seconds 2
+
+  # 安装收尾再等焦点就绪，避免误报卡住
+  for ($i = 0; $i -lt 8; $i++) {
+    if (Show-Status $AdbPath $Serial) { return }
+    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity; am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+    Start-Sleep -Seconds 2
+  }
 }
 
 # 兼容旧函数名
@@ -928,16 +978,35 @@ function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [
   Write-Step "防卡住校验（安装后自动救援）"
 
   if ($PrivilegedMode) {
-    # 特权安装后禁止用用户安装路径“救援”，否则会卸掉 SYSTEM 包
     if (Show-Status $AdbPath $Serial) { return $true }
+
+    # FallbackHome：priv-app 可能因 0777 权限被 PM 跳过。重写权限并重启扫包。
+    if (Test-IsFallbackHome $AdbPath $Serial) {
+      Write-Warn "特权模式检测到 FallbackHome，修复 priv-app 权限并重启扫包"
+      try {
+        Install-SystemLawnchairApk $AdbPath $Serial $ApkPath
+        Reboot-And-Reconnect $AdbPath $Serial 180
+        Ensure-Root $AdbPath $Serial
+        if (Wait-PackagePrivileged $AdbPath $Serial 45) {
+          $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+          $null = Invoke-Adb $AdbPath -s $Serial shell "cmd role add-role-holder android.app.role.HOME $PackageName >/dev/null 2>&1"
+          $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+          Start-Sleep -Seconds 2
+          if (Show-Status $AdbPath $Serial) { return $true }
+        }
+      } catch {
+        Write-Warn "FallbackHome 特权救援异常: $($_.Exception.Message)"
+      }
+    }
+
     Write-Warn "特权安装后桌面未就绪：尝试 set-home + 拉起"
     $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity"
+    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd role add-role-holder android.app.role.HOME $PackageName >/dev/null 2>&1"
     $null = Invoke-Adb $AdbPath -s $Serial shell "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
     Start-Sleep -Seconds 2
     return (Show-Status $AdbPath $Serial)
   }
 
-  # 第一轮：软修复（不重启）
   Write-Ok "第 1 步：软修复（不重启）"
   try {
     Install-Or-Repair-UserHome $AdbPath $Serial $ApkPath
@@ -946,7 +1015,6 @@ function Ensure-HomeReady([string]$AdbPath, [string]$Serial, [string]$ApkPath, [
     Write-Warn "软修复异常: $($_.Exception.Message)"
   }
 
-  # 第二轮起：重启模拟器再救援（你确认的有效方法）
   for ($i = 1; $i -le $MaxTries; $i++) {
     Write-Warn "第 $($i+1) 步：重启模拟器后再救援 ($i/$MaxTries)"
     $ok = Recover-FallbackHome $AdbPath $Serial $ApkPath

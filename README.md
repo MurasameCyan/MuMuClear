@@ -32,7 +32,10 @@
 > **常见问题 2：点应用图标弹出「未安装该应用」**  
 > 这不是真的没装，而是桌面没有 `SYSTEM + PRIVILEGED`，拿不到 `MANAGE_ACTIVITY_TASKS`（Lawnchair 启动动画需要）。  
 > **必须**跑 `.\MuMuClear.ps1 -PrivilegedInstall` 并让模拟器**完成重启扫包**；不要只用用户安装 / `-SkipReboot`。
-## 下载
+>
+> **常见问题 3：重启后黑屏（FallbackHome）**  
+> MuMu 可写系统上 `mkdir` 有时会把目录弄成 `0777`，PackageManager **跳过** world-writable 的 priv-app → 没有桌面。  
+> 脚本现已强制 `0755/0644` 并校验；仍黑屏请再跑一次：`.\MuMuClear.ps1 -PrivilegedInstall`。## 下载
 
 到 [Releases](https://github.com/MurasameCyan/MuMuClear/releases) 下载 **`MuMuClear-share.zip`**，解压即可。
 
