@@ -1,0 +1,10 @@
+# large local tools / caches
+APK.Tool.GUI/
+uploads/
+*.idsig
+lawnchair_src/
+lawnchair_apkeditor/
+
+# optional local pulls
+shared_Lawnchair.apk
+OriginalBackup*.mumudata
