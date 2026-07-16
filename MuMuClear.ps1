@@ -26,11 +26,12 @@
   快速开始
   ============================================================
   1. 先启动 MuMu，进入安卓系统
-  2. 在脚本目录打开 PowerShell：
+  2. 将本目录放到英文路径（勿放桌面/下载等中文目录）
+  3. 在脚本目录打开 PowerShell：
        cd <脚本目录>
        .\MuMuClear.ps1
-  3. 等待安装完成；按 Home 应进入 Lawnchair
-  4. 数据目录：/data/user/0/app.lawnchair
+  4. 等待安装完成；按 Home 应进入 Lawnchair
+  5. 数据目录：/data/user/0/app.lawnchair
 
   若 ExecutionPolicy 拦截：
        powershell -NoProfile -ExecutionPolicy Bypass -File .\MuMuClear.ps1
@@ -226,9 +227,12 @@ function Show-Usage {
     "  local\ / devtools\                 # 本地/开发，勿分享",
     "",
     "快速开始：",
-    "  1. 启动 MuMu",
-    "  2. cd 到脚本目录",
-    "  3. .\MuMuClear.ps1   # 安装后自动防卡住校验",
+    "  1. 启动 MuMu，开启 Root + 可写系统并重启",
+    "  2. 解压到英文路径（不要放桌面/下载等中文目录）",
+    "  3. cd 到脚本目录后运行 .\MuMuClear.ps1",
+    "",
+    "注意：",
+    "  路径含中文时 adb/推送可能报错，请使用如 C:\MuMuClear",
     "",
     "常用命令：",
     "  .\MuMuClear.ps1                  # 连接+安装+默认桌面（推荐）",
@@ -861,6 +865,20 @@ try {
   # 默认走特权安装（修复点击图标未安装）；-UserInstallOnly 才用户空间
   if (-not $ConnectOnly -and -not $RecoverOnly -and -not $UserInstallOnly -and -not $PrivilegedInstall) {
     $PrivilegedInstall = $true
+  }
+
+  # 中文/非 ASCII 路径会导致 adb push、 purl 编码异常
+  if ($ScriptDir -match '[^\x00-\x7F]') {
+    throw @"
+当前脚本目录包含中文或非英文字符，运行会报错：
+  $ScriptDir
+
+请把整个 MuMuClear 文件夹移动到纯英文路径后再运行，例如：
+  C:\MuMuClear
+  D:\tools\MuMuClear
+
+不要放在「桌面 / 下载 / 中文用户名目录」下。
+"@
   }
 
   Write-Ok "scriptDir: $ScriptDir"
