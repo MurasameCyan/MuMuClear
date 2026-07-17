@@ -124,6 +124,7 @@ jobs:
             - **纯系统替换**覆盖 `/system/priv-app`（双路径 app.lawnchair + Lawnchair）
             - Host 加固：`phone.rom.reset=0`、`system_vdi.sharable=Writable`，减轻「多开器完全退出再开」回广告桌面
             - 强制 priv-app `0755/0644`，降低 FallbackHome 黑屏
+            - **修复分享包无法替换**：Windows CRLF 导致多行 `adb shell` 静默失败；现自动去 `\r` 并校验远端 APK 大小
             - **不再依赖** KernelSU 模块做冷启动持久化
           files: |
             MuMuClear-share.zip

@@ -318,7 +318,18 @@ function Invoke-Adb {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $out = & $AdbPath @Args 2>&1
+    # Windows 下 *.ps1 常为 CRLF；多行 adb shell 脚本若带 \r，Android sh 会报
+    # "umask: bad number" / "set: - : unknown option"，写入静默失败。
+    $norm = @()
+    foreach ($a in $Args) {
+      if ($null -eq $a) { $norm += $a; continue }
+      $s = [string]$a
+      if ($s.IndexOf([char]13) -ge 0) {
+        $s = $s.Replace("`r`n", "`n").Replace("`r", "`n")
+      }
+      $norm += $s
+    }
+    $out = & $AdbPath @norm 2>&1
     ($out | ForEach-Object {
       if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
     }) -join "`n"
@@ -882,8 +893,13 @@ function Install-SystemLawnchairApk([string]$AdbPath, [string]$Serial, [string]$
   # 2) 规范路径 /system/priv-app/app.lawnchair 为主；同时删除/覆盖原版
   #    /system/priv-app/Lawnchair，防止广告桌面回退。
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
-  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_lawnchair.apk
-  $null = Invoke-Adb $AdbPath -s $Serial shell @"
+  $expectBytes = [long](Get-Item -LiteralPath $full).Length
+  $push = (Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_lawnchair.apk).Trim()
+  Write-Host "  $push"
+  if ($push -notmatch "pushed|skipped") {
+    throw "adb push APK 失败: $push"
+  }
+  $shellOut = (Invoke-Adb $AdbPath -s $Serial shell @"
 umask 022
 set -e
 # 清掉所有可能冲突路径
@@ -912,10 +928,19 @@ rm -rf /system/priv-app/app.lawnchair/oat /system/priv-app/Lawnchair/oat
 rm -rf /data/system/package_cache/*/*[Ll]awnchair* /data/system/package_cache/*/*lawnchair* 2>/dev/null || true
 sync
 ls -la /system/priv-app/app.lawnchair/ /system/priv-app/Lawnchair/
-"@
-  # 校验权限：若仍是 world-writable，立刻报错而不是带着隐患重启
+stat -c '%n %s' /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk
+"@).Trim()
+  Write-Host "  $shellOut"
+  if ($shellOut -match "bad number|unknown option|Read-only file system|Permission denied") {
+    throw "系统写入 shell 失败（常见原因：脚本 CRLF 或未开可写系统）:`n$shellOut"
+  }
+
+  # 校验：权限 + 远端大小必须等于本地清爽 APK（原版约 43MB，清爽约 18MB）
   $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair; ls -l /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk").Trim()
   Write-Host "  $ls"
+  if ($ls -match "No such file" -or $ls -notmatch "app\.lawnchair\.apk" -or $ls -notmatch "Lawnchair\.apk") {
+    throw "系统路径未写上 APK。请确认 Root+可写系统。ls:`n$ls"
+  }
   if ($ls -match "drwxrwxrwx|rw-rw-rw-") {
     Write-Warn "检测到 world-writable 权限，再次强制 chmod"
     $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair; chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk"
@@ -925,8 +950,24 @@ ls -la /system/priv-app/app.lawnchair/ /system/priv-app/Lawnchair/
       throw "无法把 priv-app 目录权限设为 0755（仍是 0777）。PackageManager 会跳过该目录导致黑屏。请确认可写系统已开。"
     }
   }
+  $sizes = (Invoke-Adb $AdbPath -s $Serial shell "stat -c %s /system/priv-app/app.lawnchair/app.lawnchair.apk; stat -c %s /system/priv-app/Lawnchair/Lawnchair.apk").Trim() -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' }
+  foreach ($sz in $sizes) {
+    $n = [long]$sz
+    if ([math]::Abs($n - $expectBytes) -gt 64) {
+      throw @"
+系统 APK 大小不对（写入未真正生效）。
+  期望: $expectBytes 字节（本地清爽包）
+  实际: $n
+  远端: $sizes
+
+常见原因：
+  - 未开启「可写系统」/ Root
+  - 旧版分享包多行 adb shell 带 CRLF 导致 sh 失败（请用最新 Release）
+"@
+    }
+  }
   $null = Invoke-Adb $AdbPath -s $Serial shell "sync; sync; md5sum /system/priv-app/Lawnchair/Lawnchair.apk /system/priv-app/app.lawnchair/app.lawnchair.apk 2>/dev/null"
-  Write-Ok "系统路径已写入且权限安全（0755/0644）"
+  Write-Ok "系统路径已写入且权限安全（0755/0644，大小=$expectBytes）"
 }
 
 function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
@@ -1207,6 +1248,13 @@ try {
   Write-Ok "scriptDir: $ScriptDir"
   Write-Ok "toolDir  : $ToolDir"
   Write-Ok "adbDir   : $AdbDir"
+
+  # 从 GitHub 下载的分享包常带 Zone.Identifier，解除阻止避免 adb/脚本异常
+  try {
+    Get-ChildItem -LiteralPath $ToolDir -Recurse -File -ErrorAction SilentlyContinue |
+      Unblock-File -ErrorAction SilentlyContinue
+    Unblock-File -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue
+  } catch {}
 
   $adb = Find-Adb
   Write-Ok "adb: $adb"
