@@ -73,7 +73,7 @@
                          默认：tool\Lawnchair_app.lawnchair_signed.apk
   -PackageName           包名。默认 app.lawnchair
   -HomeActivity          桌面 Activity。默认 app.lawnchair/.LawnchairLauncher
-  -Index                 MuMu 多开序号。-1=自动选在线实例（默认）
+  -Index                 MuMu 多开序号。-1=自动：仅1个A15则直装；多个则交互输入编号
   -ConnectOnly           只探测端口并 adb connect，不安装
   -RecoverOnly           黑屏/回滚：重启 -> 清 priv-app/overlay -> 用户安装 -> 设 HOME
   -PrivilegedInstall     推荐修复“未安装”：系统 priv-app + recents overlay + 重启
@@ -247,7 +247,7 @@ function Show-Usage {
     "  .\MuMuClear.ps1                  # 连接+安装+默认桌面（推荐）",
     "  .\MuMuClear.ps1 -ConnectOnly     # 只连接",
     "  .\MuMuClear.ps1 -RecoverOnly     # 黑屏救援（会先重启模拟器）",
-    "  .\MuMuClear.ps1 -Index 9         # 指定多开",
+    "  .\MuMuClear.ps1 -Index 9         # 指定多开（也可不写，多开时交互选择）",
     "  .\MuMuClear.ps1 -Apk xxx.apk     # 指定 APK（相对脚本目录）",
     "  .\MuMuClear.ps1 -DisableStockLauncher",
     "  .\MuMuClear.ps1 -ForceSystemPrivApp   # 危险，testkey 易黑屏",
@@ -259,11 +259,12 @@ function Show-Usage {
     "  -DisableStockLauncher -StockLauncher -NoProxyPorts -Help",
     "",
     "默认流程：",
-    "  自动连 MuMu -> root -> 删 priv-app 冲突 -> 用户安装 -> 设 HOME -> 防卡住救援",
+    "  探测多开名称+安卓版本 -> 仅 A15 可处理 -> 1个自动装 / 多个输入 Index",
+    "  -> 特权安装（priv-app 双路径 + host rom.reset=0）-> 设 HOME",
     "",
-    "黑屏原因：",
-    "  testkey 包覆盖 /system/priv-app 会导致 FallbackHome。",
-    "  默认模式用【用户安装】，稳定。数据目录 /data/user/0/app.lawnchair",
+    "多开选择：",
+    "  显示名来自多开器（extra_config.playerName）；非 A15 自动排除",
+    "  也可: .\MuMuClear.ps1 -Index N -PrivilegedInstall",
     "",
     "黑了就跑：",
     "  .\MuMuClear.ps1 -RecoverOnly   # 会先 reboot 再救援",
@@ -368,6 +369,25 @@ function Find-MuMuVmsRoot {
   return $null
 }
 
+function Get-InstanceDisplayMeta([string]$InstDir, [string]$VmName) {
+  # MuMu 多开器显示名在 configs\extra_config.json 的 playerName
+  $name = $null
+  $series = $null
+  $extra = Join-Path $InstDir "configs\extra_config.json"
+  if (Test-Path -LiteralPath $extra) {
+    try {
+      $ej = [System.IO.File]::ReadAllText($extra, [System.Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+      if ($ej.playerName) { $name = [string]$ej.playerName }
+      if ($ej.series) { $series = [string]$ej.series }
+    } catch {}
+  }
+  if (-not $series -and $VmName -match "MuMuPlayer-(\d+\.\d+)-") {
+    $series = $Matches[1]
+  }
+  if (-not $name) { $name = $VmName }
+  return [PSCustomObject]@{ DisplayName = $name; Series = $series }
+}
+
 function Get-ConfigPorts([string]$VmsRoot, [int]$OnlyIndex) {
   $list = @()
   Get-ChildItem $VmsRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
@@ -377,24 +397,56 @@ function Get-ConfigPorts([string]$VmsRoot, [int]$OnlyIndex) {
     $cfg = Join-Path $_.FullName "configs\vm_config.json"
     if (-not (Test-Path $cfg)) { return }
     try {
-      $j = Get-Content -Raw -LiteralPath $cfg | ConvertFrom-Json
+      $j = [System.IO.File]::ReadAllText($cfg, [System.Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
       $port = [int]$j.vm.nat.port_forward.adb.host_port
       if ($port -le 0) { return }
       $log = Join-Path $_.FullName "logs\shell.log"
       $logTime = if (Test-Path $log) { (Get-Item $log).LastWriteTime } else { [datetime]::MinValue }
+      $meta = Get-InstanceDisplayMeta $_.FullName $_.Name
       $list += [PSCustomObject]@{
-        Index = $idx; VM = $_.Name; Port = $port; LogTime = $logTime
-        Serial = "127.0.0.1:$port"; Source = "vm_config"
+        Index = $idx
+        VM = $_.Name
+        DisplayName = $meta.DisplayName
+        Series = $meta.Series
+        Port = $port
+        LogTime = $logTime
+        Serial = "127.0.0.1:$port"
+        Source = "vm_config"
+        Android = $null
+        Sdk = $null
+        Model = $null
       }
     } catch {}
   }
   return $list | Sort-Object Index
 }
 
+function Test-IsAndroid15([string]$AndroidRelease, [string]$Sdk, [string]$Series, [string]$VmName) {
+  # 优先 adb 实测；否则用 MuMu 系列号 / 目录名推断
+  if ($Sdk -match '^\d+$' -and [int]$Sdk -ge 35) { return $true }
+  if ($AndroidRelease -match '^(1[5-9]|[2-9]\d)') { return $true }
+  if ($Series -match '^15(\.|$)') { return $true }
+  if ($VmName -match 'MuMuPlayer-15(\.|-)') { return $true }
+  return $false
+}
+
+function Get-DeviceAndroidInfo([string]$AdbPath, [string]$Serial) {
+  $ver = (Invoke-Adb $AdbPath -s $Serial shell getprop ro.build.version.release).Trim()
+  $sdk = (Invoke-Adb $AdbPath -s $Serial shell getprop ro.build.version.sdk).Trim()
+  $model = (Invoke-Adb $AdbPath -s $Serial shell getprop ro.product.model).Trim()
+  # 清掉 adb 错误噪声
+  if ($ver -match 'error:|not found|device offline|no devices|^\s*$') { $ver = $null }
+  if ($sdk -match 'error:|not found|device offline|no devices|^\s*$') { $sdk = $null }
+  if ($model -match 'error:|not found|device offline|no devices|^\s*$') { $model = $null }
+  return [PSCustomObject]@{ Android = $ver; Sdk = $sdk; Model = $model }
+}
+
 function Get-ListenPorts {
   $out = @()
   Get-Process MuMuNxDevice -ErrorAction SilentlyContinue | ForEach-Object {
     $proc = $_
+    $winTitle = ""
+    try { $winTitle = [string]$proc.MainWindowTitle } catch {}
     Get-NetTCPConnection -OwningProcess $proc.Id -State Listen -ErrorAction SilentlyContinue |
       Where-Object {
         ($_.LocalPort -ge 16384 -and $_.LocalPort -le 20000) -or
@@ -402,8 +454,17 @@ function Get-ListenPorts {
         ($_.LocalPort -ge 5555 -and $_.LocalPort -le 5600)
       } | ForEach-Object {
         $out += [PSCustomObject]@{
-          Index = -1; VM = "MuMuNxDevice"; Port = [int]$_.LocalPort; LogTime = Get-Date
-          Serial = "127.0.0.1:$($_.LocalPort)"; Source = "listen"
+          Index = -1
+          VM = "MuMuNxDevice"
+          DisplayName = $(if ($winTitle) { $winTitle } else { "未命名/代理端口" })
+          Series = $null
+          Port = [int]$_.LocalPort
+          LogTime = Get-Date
+          Serial = "127.0.0.1:$($_.LocalPort)"
+          Source = "listen"
+          Android = $null
+          Sdk = $null
+          Model = $null
         }
       }
   }
@@ -434,7 +495,7 @@ function Get-VmInstanceDir([string]$VmsRoot, [int]$Index, [string]$Serial) {
     $cfg = Join-Path $_.FullName "configs\vm_config.json"
     if (-not (Test-Path $cfg)) { return }
     try {
-      $j = Get-Content -Raw -LiteralPath $cfg | ConvertFrom-Json
+      $j = [System.IO.File]::ReadAllText($cfg, [System.Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
       $cfgPort = [int]$j.vm.nat.port_forward.adb.host_port
       if ($port -and $cfgPort -eq $port) { $script:__bestInst = $_.FullName; return }
       if ($Index -ge 0 -and $idx -eq $Index -and -not $script:__bestInst) { $script:__bestInst = $_.FullName }
@@ -461,7 +522,7 @@ function Ensure-HostVmPersistence([string]$VmsRoot, [int]$Index, [string]$Serial
   try {
     $bak = "$cfgPath.bak_mumu_clear"
     if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $cfgPath -Destination $bak -Force }
-    $j = Get-Content -Raw -LiteralPath $cfgPath | ConvertFrom-Json
+    $j = [System.IO.File]::ReadAllText($cfgPath, [System.Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
     $changed = $false
     if (-not $j.vm) { throw "vm_config 缺少 vm 字段" }
 
@@ -541,22 +602,38 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
 
   $map = @{}
   foreach ($p in $cfgPorts) { $map[$p.Port] = $p }
-  foreach ($p in $listen) { if (-not $map.ContainsKey($p.Port)) { $map[$p.Port] = $p } }
+  foreach ($p in $listen) {
+    if (-not $map.ContainsKey($p.Port)) {
+      # listen 兜底：尽量反查 vm_config 端口对应实例
+      $hit = $cfgPorts | Where-Object { $_.Port -eq $p.Port } | Select-Object -First 1
+      if ($hit) { $map[$p.Port] = $hit }
+      else {
+        $p | Add-Member -NotePropertyName DisplayName -NotePropertyValue "未命名/代理端口" -Force
+        $p | Add-Member -NotePropertyName Series -NotePropertyValue $null -Force
+        $p | Add-Member -NotePropertyName Android -NotePropertyValue $null -Force
+        $p | Add-Member -NotePropertyName Sdk -NotePropertyValue $null -Force
+        $p | Add-Member -NotePropertyName Model -NotePropertyValue $null -Force
+        $map[$p.Port] = $p
+      }
+    }
+  }
 
   if ($cfgPorts.Count -gt 0) {
-    Write-Host ("  {0,-6} {1,-22} {2}" -f "Index", "VM", "Port") -ForegroundColor DarkGray
+    Write-Host ("  {0,-6} {1,-18} {2,-6} {3,-22} {4}" -f "Index", "名称", "系列", "VM", "Port") -ForegroundColor DarkGray
     foreach ($c in $cfgPorts) {
-      Write-Host ("  {0,-6} {1,-22} {2}" -f $c.Index, $c.VM, $c.Port)
+      $ser = if ($c.Series) { $c.Series } else { "?" }
+      $mark = if (Test-IsAndroid15 $null $null $c.Series $c.VM) { "" } else { " (非A15)" }
+      Write-Host ("  {0,-6} {1,-18} {2,-6} {3,-22} {4}{5}" -f $c.Index, $c.DisplayName, $ser, $c.VM, $c.Port, $mark)
     }
   }
 
   $live = @()
   foreach ($port in ($map.Keys | Sort-Object)) {
     if (Test-TcpOpen -Port $port) {
-      Write-Ok "在线 $($map[$port].Serial) [$($map[$port].Source)]"
+      Write-Ok "在线 $($map[$port].Serial)  [$($map[$port].DisplayName)]"
       $live += $map[$port]
     } else {
-      Write-Host "  [ ] 未开放: 127.0.0.1:$port" -ForegroundColor DarkGray
+      Write-Host "  [ ] 未开放: 127.0.0.1:$port  $($map[$port].DisplayName)" -ForegroundColor DarkGray
     }
   }
   if ($live.Count -eq 0) { throw "没有在线实例，请先打开 MuMu" }
@@ -566,41 +643,95 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
   foreach ($item in $live) {
     $msg = (Invoke-Adb $AdbPath connect $item.Serial).Trim()
     if ($msg -match "connected|already") {
-      Write-Ok $msg
-      $connected += $item
+      # 探测 Android 版本（用于过滤非 A15）
+      $info = Get-DeviceAndroidInfo $AdbPath $item.Serial
+      $item.Android = $info.Android
+      $item.Sdk = $info.Sdk
+      $item.Model = $info.Model
+      $a15 = Test-IsAndroid15 $item.Android $item.Sdk $item.Series $item.VM
+      $verLabel = if ($item.Android) { "Android $($item.Android)" } elseif ($item.Series) { "系列 $($item.Series)" } else { "版本未知" }
+      if ($a15) {
+        Write-Ok "$($item.Serial)  $($item.DisplayName)  $verLabel  [可处理]"
+        $connected += $item
+      } else {
+        Write-Warn "跳过非 Android 15: Index=$($item.Index)  $($item.DisplayName)  $verLabel  $($item.Serial)"
+      }
     } else {
       Write-Warn "$($item.Serial) -> $msg"
     }
   }
 
-    # 在线实例按：配置端口优先、非 7555 代理、最近日志
+  # 在线实例按：配置端口优先、非 7555 代理、最近日志
   $ranked = @($connected |
     Sort-Object `
       @{ Expression = { if ($_.Source -eq "vm_config") { 0 } else { 1 } } }, `
       @{ Expression = { if ($_.Port -ge 16384) { 0 } elseif ($_.Port -eq 7555) { 2 } else { 1 } } }, `
       @{ Expression = { $_.LogTime }; Descending = $true })
 
-  if ($ranked.Count -eq 0) { throw "connect 失败" }
-
-  # 多个在线且未指定 -Index：必须让用户选，避免改错机（表现为「没效果」）
-  $uniqueIdx = @($ranked | Where-Object { $_.Index -ge 0 } | Select-Object -ExpandProperty Index -Unique)
-  if ($OnlyIndex -lt 0 -and $uniqueIdx.Count -gt 1) {
-    Write-Host ""
-    Write-Host "检测到多个在线实例，请用 -Index 指定要清理的多开序号：" -ForegroundColor Yellow
-    foreach ($c in $ranked) {
-      $mark = if ($c -eq $ranked[0]) { " (默认候选)" } else { "" }
-      Write-Host ("  -Index {0,-4}  {1,-22}  {2}{3}" -f $c.Index, $c.VM, $c.Serial, $mark)
-    }
-    Write-Host ""
-    Write-Host "示例: .\MuMuClear.ps1 -Index $($ranked[0].Index) -PrivilegedInstall" -ForegroundColor Cyan
-    throw "多开在线时必须指定 -Index，避免改到错误的实例"
+  if ($ranked.Count -eq 0) {
+    throw "没有可处理的 Android 15 在线实例（已排除 A12/其它版本）。请启动 A15 实例后重试。"
   }
 
-  $primary = $ranked | Select-Object -First 1
+  # 用户已指定 -Index：校验该序号在可处理列表中
+  if ($OnlyIndex -ge 0) {
+    $hit = @($ranked | Where-Object { $_.Index -eq $OnlyIndex })
+    if ($hit.Count -eq 0) {
+      Write-Host ""
+      Write-Host "当前可处理的 Android 15 在线实例：" -ForegroundColor Yellow
+      foreach ($c in $ranked) {
+        $ver = if ($c.Android) { "A$($c.Android)" } else { "系列$($c.Series)" }
+        Write-Host ("  -Index {0,-4}  {1,-18}  {2,-10}  {3}" -f $c.Index, $c.DisplayName, $ver, $c.Serial)
+      }
+      throw "指定的 -Index $OnlyIndex 不在可处理的 Android 15 在线列表中（或不在线/非 A15）"
+    }
+    $primary = $hit | Select-Object -First 1
+  }
+  elseif ($ranked.Count -eq 1) {
+    # 只有 1 个可处理实例：直接 patch
+    $primary = $ranked[0]
+    Write-Ok "仅 1 个 Android 15 在线实例，自动选择: Index=$($primary.Index)  $($primary.DisplayName)"
+  }
+  else {
+    # 多个：列出名称 + 版本，让用户输入编号
+    Write-Host ""
+    Write-Host "检测到多个 Android 15 在线实例，请输入要处理的编号（Index）：" -ForegroundColor Yellow
+    Write-Host ("  {0,-6} {1,-18} {2,-10} {3}" -f "Index", "名称", "系统", "adb") -ForegroundColor DarkGray
+    foreach ($c in $ranked) {
+      $ver = if ($c.Android) { "A$($c.Android)" } elseif ($c.Series) { "系列$($c.Series)" } else { "?" }
+      Write-Host ("  {0,-6} {1,-18} {2,-10} {3}" -f $c.Index, $c.DisplayName, $ver, $c.Serial)
+    }
+    Write-Host ""
+    $allowed = @($ranked | Select-Object -ExpandProperty Index -Unique)
+    $chosen = $null
+    for ($try = 0; $try -lt 5; $try++) {
+      $raw = Read-Host "请输入 Index（回车默认 $($allowed[0])）"
+      if ([string]::IsNullOrWhiteSpace($raw)) {
+        $chosen = [int]$allowed[0]
+        break
+      }
+      if ($raw -match '^\s*(\d+)\s*$') {
+        $n = [int]$Matches[1]
+        if ($allowed -contains $n) { $chosen = $n; break }
+      }
+      Write-Warn "无效编号，可选: $($allowed -join ', ')"
+    }
+    if ($null -eq $chosen) {
+      throw "未选择有效实例编号。也可下次直接: .\MuMuClear.ps1 -Index N -PrivilegedInstall"
+    }
+    $primary = $ranked | Where-Object { $_.Index -eq $chosen } | Select-Object -First 1
+    if (-not $primary) { throw "选择的 Index=$chosen 无效" }
+  }
+
   if (-not $primary) { throw "connect 失败" }
+  # 交互/自动选中后回写全局 -Index，供 Ensure-HostVmPersistence 等使用
+  if ($primary.Index -ge 0) {
+    $script:Index = [int]$primary.Index
+  }
+  $verShow = if ($primary.Android) { "Android $($primary.Android)" } elseif ($primary.Series) { "系列 $($primary.Series)" } else { "Android 15?" }
   Write-Host ""
   Write-Host "============================================================" -ForegroundColor Green
-  Write-Host "  将操作实例: Index=$($primary.Index)  $($primary.VM)" -ForegroundColor Green
+  Write-Host "  将操作实例: Index=$($primary.Index)  名称=$($primary.DisplayName)" -ForegroundColor Green
+  Write-Host "  VM: $($primary.VM)  $verShow" -ForegroundColor Green
   Write-Host "  adb: $($primary.Serial)" -ForegroundColor Green
   Write-Host "============================================================" -ForegroundColor Green
   Write-Host ""
