@@ -2,12 +2,19 @@ name: Release share zip
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - "MuMuClear.ps1"
+      - "tool/**"
+      - "README.md"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag/version (e.g. v1.0.0). Leave empty to use run id."
+        description: "Release tag/version (e.g. v1.0.0). Leave empty to auto-generate."
         required: false
         default: ""
 
@@ -25,18 +32,21 @@ jobs:
         id: ver
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $v = $env:GITHUB_REF_NAME
           } elseif ("${{ github.event.inputs.version }}".Trim()) {
             $v = "${{ github.event.inputs.version }}".Trim()
           } else {
-            $v = "v0.0.${{ github.run_number }}"
+            # push main / empty dispatch: auto version
+            $v = "v1.${{ github.run_number }}.0"
           }
           if ($v -notmatch '^v') { $v = "v$v" }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "version=$v"
 
       - name: Build MuMuClear-share.zip
+        id: zip
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -63,19 +73,34 @@ jobs:
           Get-ChildItem (Join-Path $stage 'tool') -Recurse -File -Filter '*.ps1' |
             Remove-Item -Force -ErrorAction SilentlyContinue
 
-          # Do not ship optional heavy/local-only leftovers if any sneak in
+          # 不打包本地/调试残留
           Get-ChildItem (Join-Path $stage 'tool') -Recurse -File |
             Where-Object { $_.Name -match '\.idsig$|Debug|shared_Lawnchair|\.zip$' } |
             Remove-Item -Force -ErrorAction SilentlyContinue
 
-          $zip = Join-Path $PWD 'MuMuClear-share.zip'
+          # 可选：附带精简 README（有则复制）
+          if (Test-Path -LiteralPath 'README.md') {
+            Copy-Item -LiteralPath 'README.md' -Destination (Join-Path $stage 'README.md')
+          }
+
+          $zipName = 'MuMuClear-share.zip'
+          $zip = Join-Path $PWD $zipName
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
           $item = Get-Item $zip
           Write-Host ("zip={0} size={1}" -f $item.FullName, $item.Length)
           if ($item.Length -lt 1MB) { throw 'zip too small' }
 
-          "name=MuMuClear-share.zip" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=$zipName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "path=$zip" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "size=$($item.Length)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MuMuClear-share
+          path: MuMuClear-share.zip
+          if-no-files-found: error
 
       - name: Create GitHub Release and upload zip
         uses: softprops/action-gh-release@v2
@@ -85,7 +110,7 @@ jobs:
           body: |
             ## MuMuClear ${{ steps.ver.outputs.version }}
 
-            下载 **MuMuClear-share.zip**，解压后在 MuMu 已启动时执行：
+            下载 **MuMuClear-share.zip**，解压到**英文路径**后，在 MuMu 已启动且 **Root + 可写系统** 已开时执行：
 
             ```powershell
             .\MuMuClear.ps1 -PrivilegedInstall
@@ -93,10 +118,18 @@ jobs:
 
             - 黑屏救援：`.\MuMuClear.ps1 -RecoverOnly`
             - 仅连接：`.\MuMuClear.ps1 -ConnectOnly`
+            - 多开指定实例：`.\MuMuClear.ps1 -Index N -PrivilegedInstall`
+
+            ### 本版要点
+            - **纯系统替换**覆盖 `/system/priv-app`（双路径 app.lawnchair + Lawnchair）
+            - Host 加固：`phone.rom.reset=0`、`system_vdi.sharable=Writable`，减轻「多开器完全退出再开」回广告桌面
+            - 强制 priv-app `0755/0644`，降低 FallbackHome 黑屏
+            - **不再依赖** KernelSU 模块做冷启动持久化
           files: |
             MuMuClear-share.zip
           draft: false
           prerelease: false
           generate_release_notes: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

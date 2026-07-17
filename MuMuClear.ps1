@@ -411,6 +411,113 @@ function Test-TcpOpen([int]$Port, [int]$TimeoutMs = 400) {
   } catch { return $false }
 }
 
+function Get-VmInstanceDir([string]$VmsRoot, [int]$Index, [string]$Serial) {
+  if (-not $VmsRoot -or -not (Test-Path -LiteralPath $VmsRoot)) { return $null }
+  $port = $null
+  if ($Serial -match ':(\d+)$') { $port = [int]$Matches[1] }
+  $script:__bestInst = $null
+  Get-ChildItem -LiteralPath $VmsRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Name -notmatch "MuMuPlayer-.*?-(\d+)$") { return }
+    $idx = [int]$Matches[1]
+    if ($Index -ge 0 -and $idx -ne $Index) { return }
+    $cfg = Join-Path $_.FullName "configs\vm_config.json"
+    if (-not (Test-Path $cfg)) { return }
+    try {
+      $j = Get-Content -Raw -LiteralPath $cfg | ConvertFrom-Json
+      $cfgPort = [int]$j.vm.nat.port_forward.adb.host_port
+      if ($port -and $cfgPort -eq $port) { $script:__bestInst = $_.FullName; return }
+      if ($Index -ge 0 -and $idx -eq $Index -and -not $script:__bestInst) { $script:__bestInst = $_.FullName }
+    } catch {}
+  }
+  $r = $script:__bestInst
+  Remove-Variable -Name __bestInst -Scope Script -ErrorAction SilentlyContinue
+  return $r
+}
+
+function Ensure-HostVmPersistence([string]$VmsRoot, [int]$Index, [string]$Serial) {
+  Write-Step "加固 host 实例配置（防冷启动回滚 system-diff）"
+  $inst = Get-VmInstanceDir $VmsRoot $Index $Serial
+  if (-not $inst) {
+    Write-Warn "未定位到实例目录，跳过 host 配置加固"
+    return $null
+  }
+  Write-Ok "实例目录: $inst"
+  $cfgPath = Join-Path $inst "configs\vm_config.json"
+  if (-not (Test-Path -LiteralPath $cfgPath)) {
+    Write-Warn "无 vm_config.json: $cfgPath"
+    return $inst
+  }
+  try {
+    $bak = "$cfgPath.bak_mumu_clear"
+    if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $cfgPath -Destination $bak -Force }
+    $j = Get-Content -Raw -LiteralPath $cfgPath | ConvertFrom-Json
+    $changed = $false
+    if (-not $j.vm) { throw "vm_config 缺少 vm 字段" }
+
+    if ("$($j.vm.root)" -ne "true") {
+      $j.vm | Add-Member -NotePropertyName root -NotePropertyValue "true" -Force
+      $changed = $true
+      Write-Ok "vm.root = true"
+    } else { Write-Host "  vm.root = true" }
+
+    if (-not $j.vm.system_vdi) {
+      $j.vm | Add-Member -NotePropertyName system_vdi -NotePropertyValue ([pscustomobject]@{ sharable = "Writable" }) -Force
+      $changed = $true
+    } elseif ("$($j.vm.system_vdi.sharable)" -ne "Writable") {
+      $j.vm.system_vdi.sharable = "Writable"
+      $changed = $true
+      Write-Ok "system_vdi.sharable = Writable"
+    } else { Write-Host "  system_vdi.sharable = Writable" }
+
+    if (-not $j.vm.phone) { $j.vm | Add-Member -NotePropertyName phone -NotePropertyValue ([pscustomobject]@{}) -Force }
+    if (-not $j.vm.phone.rom) {
+      $j.vm.phone | Add-Member -NotePropertyName rom -NotePropertyValue ([pscustomobject]@{ reset = "0" }) -Force
+      $changed = $true
+      Write-Ok "phone.rom.reset = 0 (新建)"
+    } elseif ("$($j.vm.phone.rom.reset)" -ne "0") {
+      $old = $j.vm.phone.rom.reset
+      $j.vm.phone.rom.reset = "0"
+      $changed = $true
+      Write-Ok "phone.rom.reset: $old -> 0（关键：否则冷启动可能丢 system-diff）"
+    } else { Write-Host "  phone.rom.reset = 0" }
+
+    if ($changed) {
+      $json = $j | ConvertTo-Json -Depth 20
+      [System.IO.File]::WriteAllText($cfgPath, $json, [System.Text.UTF8Encoding]::new($false))
+      Write-Ok "已写回: $cfgPath"
+    } else {
+      Write-Ok "host 配置已是可持久状态"
+    }
+
+    $diff = Join-Path $inst "system-diff.vdi"
+    if (Test-Path -LiteralPath $diff) {
+      $fi = Get-Item -LiteralPath $diff
+      Write-Host ("  system-diff.vdi = {0:N1} MB  mtime={1}" -f ($fi.Length / 1MB), $fi.LastWriteTime)
+    } else {
+      Write-Warn "尚无 system-diff.vdi（写入 system 后应由 MuMu 创建）"
+    }
+    return $inst
+  } catch {
+    Write-Warn "host 配置加固失败: $($_.Exception.Message)"
+    return $inst
+  }
+}
+
+function Assert-SystemDiffGrew([string]$InstDir, [long]$BeforeSize, [string]$Label) {
+  if (-not $InstDir) { return }
+  $diff = Join-Path $InstDir "system-diff.vdi"
+  if (-not (Test-Path -LiteralPath $diff)) {
+    Write-Warn "${Label}: 仍无 system-diff.vdi，冷启动可能丢修改"
+    return
+  }
+  $after = (Get-Item -LiteralPath $diff).Length
+  $delta = $after - $BeforeSize
+  Write-Host ("  system-diff {0}: {1:N1} MB (delta {2:N1} MB)" -f $Label, ($after / 1MB), ($delta / 1MB))
+  if ($delta -lt 1MB -and $Label -match "写入后") {
+    Write-Warn "system-diff 几乎没增长：系统写入可能未落到 host 磁盘"
+  }
+}
+
 function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
   Write-Step "自动探测 MuMu 端口并连接"
   $vms = Find-MuMuVmsRoot
@@ -504,10 +611,10 @@ function Wait-BootReady([string]$AdbPath, [string]$Serial, [int]$TimeoutSec = 18
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
   while ((Get-Date) -lt $deadline) {
     if ($Serial -match "^127\.0\.0\.1:") { $null = Invoke-Adb $AdbPath connect $Serial }
-    $state = (Invoke-Adb $AdbPath -s $Serial get-state 2>$null).Trim()
+    $state = (Invoke-Adb $AdbPath -s $Serial get-state).Trim()
     if ($state -eq "device") {
-      $boot = (Invoke-Adb $AdbPath -s $Serial shell getprop sys.boot_completed 2>$null).Trim()
-      $anim = (Invoke-Adb $AdbPath -s $Serial shell getprop init.svc.bootanim 2>$null).Trim()
+      $boot = (Invoke-Adb $AdbPath -s $Serial shell getprop sys.boot_completed).Trim()
+      $anim = (Invoke-Adb $AdbPath -s $Serial shell getprop init.svc.bootanim).Trim()
       # boot_completed=1 且 bootanim 停止/空 视为可操作
       if ($boot -eq "1" -and ($anim -eq "stopped" -or [string]::IsNullOrWhiteSpace($anim))) {
         # 再等一下 Settings/PM 就绪
@@ -578,7 +685,7 @@ rm -f /system/etc/permissions/privapp-permissions-app.lawnchair.xml \
       /vendor/overlay/LawnchairRecentsOverlay.apk 2>/dev/null
 "@
   # 按 pm path 再扫尾
-  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
+  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   if ($path -match "package:(.+)$") {
     $apkFile = $Matches[1].Trim()
     Write-Warn "仍见包路径: $apkFile ，强制删除"
@@ -587,7 +694,7 @@ rm -f /system/etc/permissions/privapp-permissions-app.lawnchair.xml \
     $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1"
   }
   $check = (Invoke-Adb $AdbPath -s $Serial shell "ls /system/priv-app 2>/dev/null | grep -iE 'lawn|app\.lawn' || echo CLEAN").Trim()
-  $path2 = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>$null).Trim()
+  $path2 = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   Write-Ok "system lawn dirs: $check ; pm path: $(if ($path2) { $path2 } else { 'none' })"
 }
 
@@ -749,7 +856,7 @@ function Test-IsPrivilegedSystemPackage([string]$AdbPath, [string]$Serial) {
   # 必须 SYSTEM+PRIVILEGED 且 MANAGE_ACTIVITY_TASKS granted，否则点图标会「未安装该应用」
   $flags = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep -E 'pkgFlags=|privateFlags=' | head -6").Trim()
   $grant = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep 'MANAGE_ACTIVITY_TASKS: granted' | head -2").Trim()
-  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName 2>/dev/null).Trim()
+  $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   if (-not $path) { return $false }
   if ($flags -notmatch "SYSTEM") { return $false }
   if ($flags -notmatch "PRIVILEGED") { return $false }
@@ -768,109 +875,6 @@ function Wait-PackagePrivileged([string]$AdbPath, [string]$Serial, [int]$Timeout
 }
 
 
-function Test-HasKernelSu([string]$AdbPath, [string]$Serial) {
-  $r = (Invoke-Adb $AdbPath -s $Serial shell "test -x /data/adb/ksud && echo YES || echo NO").Trim()
-  return ($r -match "YES")
-}
-
-function Install-KsuClearModule([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
-  # 持久化关键路径：KernelSU 模块写在 /data/adb/modules（走 data 分区），
-  # 每次启动 mount 覆盖 /system。比直接改 system-diff 更抗 MuMu 冷启动回滚。
-  Write-Step "安装 KernelSU 持久模块 mumu_clear（防重启回广告桌面）"
-  if (-not (Test-HasKernelSu $AdbPath $Serial)) {
-    Write-Warn "未检测到 /data/adb/ksud，跳过模块安装（仅依赖可写系统 system-diff）"
-    return $false
-  }
-  $full = (Resolve-Path -LiteralPath $ApkPath).Path
-  $xmlLocal = $null
-  foreach ($c in @(
-      (Join-Path $ToolDir "privapp-permissions-app.lawnchair.xml"),
-      (Join-Path $ScriptDir "privapp-permissions-app.lawnchair.xml")
-    )) {
-    if (Test-Path -LiteralPath $c) { $xmlLocal = $c; break }
-  }
-  if (-not $xmlLocal) {
-    $xmlLocal = Join-Path $env:TEMP "privapp-permissions-app.lawnchair.xml"
-    [System.IO.File]::WriteAllText($xmlLocal, (Get-PrivAppPermissionsXml))
-  }
-  $overlayLocal = $null
-  foreach ($c in @(
-      (Join-Path $ToolDir "LawnchairRecentsOverlay.apk"),
-      (Join-Path $ScriptDir "LawnchairRecentsOverlay.apk")
-    )) {
-    if (Test-Path -LiteralPath $c) { $overlayLocal = $c; break }
-  }
-
-  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /data/local/tmp/mumu_clear_mod; mkdir -p /data/local/tmp/mumu_clear_mod"
-  $null = Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/mumu_clear_mod/Lawnchair.apk
-  $null = Invoke-Adb $AdbPath -s $Serial push $xmlLocal /data/local/tmp/mumu_clear_mod/privapp.xml
-  if ($overlayLocal) {
-    $null = Invoke-Adb $AdbPath -s $Serial push $overlayLocal /data/local/tmp/mumu_clear_mod/overlay.apk
-  }
-
-  $null = Invoke-Adb $AdbPath -s $Serial shell @"
-set -e
-MOD=/data/adb/modules/mumu_clear
-rm -rf `$MOD
-mkdir -p `$MOD/system/priv-app/app.lawnchair
-mkdir -p `$MOD/system/priv-app/Lawnchair
-mkdir -p `$MOD/system/etc/permissions
-mkdir -p `$MOD/system/product/overlay
-mkdir -p `$MOD/product/overlay
-
-cat > `$MOD/module.prop <<'EOF'
-id=mumu_clear
-name=MuMuClear Clean Lawnchair
-version=v1.1
-versionCode=2
-author=MuMuClear
-description=Replace MuMu stock ad launcher with clean Lawnchair. Survives reboot via KernelSU module on /data.
-EOF
-
-cp /data/local/tmp/mumu_clear_mod/Lawnchair.apk `$MOD/system/priv-app/app.lawnchair/app.lawnchair.apk
-cp /data/local/tmp/mumu_clear_mod/Lawnchair.apk `$MOD/system/priv-app/Lawnchair/Lawnchair.apk
-cp /data/local/tmp/mumu_clear_mod/privapp.xml `$MOD/system/etc/permissions/privapp-permissions-app.lawnchair.xml
-if [ -f /data/local/tmp/mumu_clear_mod/overlay.apk ]; then
-  cp /data/local/tmp/mumu_clear_mod/overlay.apk `$MOD/system/product/overlay/LawnchairRecentsOverlay.apk
-  cp /data/local/tmp/mumu_clear_mod/overlay.apk `$MOD/product/overlay/LawnchairRecentsOverlay.apk
-fi
-
-cat > `$MOD/post-fs-data.sh <<'EOF'
-#!/system/bin/sh
-chmod 0755 /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null
-chmod 0644 /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null
-chmod 0644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml 2>/dev/null
-chmod 0644 /product/overlay/LawnchairRecentsOverlay.apk /system/product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null
-EOF
-
-cat > `$MOD/service.sh <<'EOF'
-#!/system/bin/sh
-(
-  while [ "`$(getprop sys.boot_completed)`" != "1" ]; do sleep 2; done
-  sleep 5
-  cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher >/dev/null 2>&1
-  cmd role add-role-holder android.app.role.HOME app.lawnchair >/dev/null 2>&1
-) &
-EOF
-
-chown -R root:root `$MOD
-find `$MOD -type d -exec chmod 755 {} +
-find `$MOD -type f -exec chmod 644 {} +
-chmod 755 `$MOD/post-fs-data.sh `$MOD/service.sh
-# verify apk size
-ls -la `$MOD/system/priv-app/Lawnchair/Lawnchair.apk `$MOD/system/priv-app/app.lawnchair/app.lawnchair.apk
-sync
-"@
-
-  $check = (Invoke-Adb $AdbPath -s $Serial shell "ls -la /data/adb/modules/mumu_clear/system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null; /data/adb/ksud module list 2>/dev/null | grep -A2 mumu_clear | head -8").Trim()
-  Write-Host "  $check"
-  if ($check -notmatch "Lawnchair.apk") {
-    Write-Warn "KernelSU 模块 APK 未就位"
-    return $false
-  }
-  Write-Ok "KernelSU 模块 mumu_clear 已安装（数据分区，冷启动也会挂载）"
-  return $true
-}
 function Install-SystemLawnchairApk([string]$AdbPath, [string]$Serial, [string]$ApkPath) {
   # 关键加固：
   # 1) 目录必须 0755、APK 必须 0644。MuMu overlay 上 mkdir 常变成 0777，
@@ -921,22 +925,29 @@ ls -la /system/priv-app/app.lawnchair/ /system/priv-app/Lawnchair/
       throw "无法把 priv-app 目录权限设为 0755（仍是 0777）。PackageManager 会跳过该目录导致黑屏。请确认可写系统已开。"
     }
   }
+  $null = Invoke-Adb $AdbPath -s $Serial shell "sync; sync; md5sum /system/priv-app/Lawnchair/Lawnchair.apk /system/priv-app/app.lawnchair/app.lawnchair.apk 2>/dev/null"
   Write-Ok "系统路径已写入且权限安全（0755/0644）"
 }
 
 function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
-  Write-Step "特权安装: priv-app + privapp-permissions + recents overlay"
-  Write-Host "  目标: SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS（否则点图标「未安装该应用」）" -ForegroundColor DarkGray
-  Write-Host "  权限: priv-app 目录必须 0755（禁止 0777，否则重启后扫包失败→黑屏）" -ForegroundColor DarkGray
+  Write-Step "特权安装（纯系统替换）: priv-app + privapp XML + recents overlay"
+  Write-Host "  路线: 直接覆盖 /system/priv-app（不走 KernelSU 模块）" -ForegroundColor DarkGray
+  Write-Host "  目标: SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS；目录 0755/0644；host 关 rom.reset" -ForegroundColor DarkGray
   if (-not (Test-Path -LiteralPath $ApkPath)) { throw "APK 不存在: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
-  Ensure-Root $AdbPath $Serial
-  # 优先装 KernelSU 模块做冷启动持久化（写 /data，不依赖 system-diff）
-  $script:KsuModuleInstalled = Install-KsuClearModule $AdbPath $Serial $full
-  if (-not $script:KsuModuleInstalled) {
-    Write-Warn "无 KernelSU 时仅依赖可写系统；从多开器完全退出再开可能回滚广告桌面"
+  # host 侧先关 rom.reset，避免冷启动丢掉 system-diff
+  $vmsRoot = Find-MuMuVmsRoot
+  $instDir = Ensure-HostVmPersistence $vmsRoot $Index $Serial
+  $diffBefore = 0L
+  if ($instDir) {
+    $diffPath = Join-Path $instDir "system-diff.vdi"
+    if (Test-Path -LiteralPath $diffPath) { $diffBefore = [long](Get-Item -LiteralPath $diffPath).Length }
   }
+
+  Ensure-Root $AdbPath $Serial
+  # 不走模块路线：清掉可能残留的 mumu_clear
+  $null = Invoke-Adb $AdbPath -s $Serial shell "rm -rf /data/adb/modules/mumu_clear /data/adb/modules_update/mumu_clear 2>/dev/null"
 
   if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
     Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖系统路径"
@@ -966,6 +977,11 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0644 /system/etc/permissions/privapp-permissions-app.lawnchair.xml; chown root:root /system/etc/permissions/privapp-permissions-app.lawnchair.xml"
 
   Install-SystemLawnchairApk $AdbPath $Serial $full
+  Assert-SystemDiffGrew $instDir $diffBefore "写入后"
+  if ($instDir) {
+    $dp = Join-Path $instDir "system-diff.vdi"
+    if (Test-Path -LiteralPath $dp) { $diffBefore = [long](Get-Item -LiteralPath $dp).Length }
+  }
 
   if ($SkipReboot) {
     Write-Warn "SkipReboot：系统扫包/权限几乎一定不会生效，点图标可能仍显示未安装"
@@ -977,12 +993,13 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
 
   Write-Step "等待 PackageManager 扫包并授权"
   $ok = Wait-PackagePrivileged $AdbPath $Serial 45
-  if (-not $ok -and -not $SkipReboot) {
-    Write-Warn "重启后仍未获得 SYSTEM+PRIVILEGED，检查权限并二次覆盖"
-    $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null; ls -l /system/priv-app/app.lawnchair/*.apk /system/priv-app/Lawnchair/*.apk 2>/dev/null").Trim()
+  $stillStock = Test-IsStockMuMuLauncher $AdbPath $Serial
+  if ((-not $ok -or $stillStock) -and -not $SkipReboot) {
+    Write-Warn "重启后未就绪或仍是原版广告包，二次系统覆盖并重启"
+    $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null; ls -l /system/priv-app/app.lawnchair/*.apk /system/priv-app/Lawnchair/*.apk 2>/dev/null; md5sum /system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null").Trim()
     Write-Host "  $ls"
     Install-SystemLawnchairApk $AdbPath $Serial $full
-    # 尝试触发扫描
+    Assert-SystemDiffGrew $instDir $diffBefore "二次写入后"
     $null = Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk >/dev/null 2>&1"
     Reboot-And-Reconnect $AdbPath $Serial 180
     Ensure-Root $AdbPath $Serial
@@ -1212,7 +1229,7 @@ try {
   Write-Host (Invoke-Adb $adb devices -l)
 
   Write-Step "安装前桌面快照（确认实例）"
-  $prePath = (Invoke-Adb $adb -s $serial shell pm path $PackageName 2>$null).Trim()
+  $prePath = (Invoke-Adb $adb -s $serial shell pm path $PackageName).Trim()
   $preVer = (Invoke-Adb $adb -s $serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
   $preHome = (Invoke-Adb $adb -s $serial shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME").Trim()
   Write-Host "  设备   : $serial"
@@ -1252,10 +1269,14 @@ if ($ConnectOnly) {
     exit 0
   }
 
-  # 若一上来就卡 FallbackHome，先重启救援再继续安装
+  # FallbackHome：特权安装会重写 /system/priv-app，勿先跑 Recover（会清 system 再装用户版）
   if (Test-IsFallbackHome $adb $serial) {
-    Write-Warn "连接后发现 FallbackHome，先重启模拟器并救援"
-    $null = Recover-FallbackHome $adb $serial $apkPath
+    if ($PrivilegedInstall) {
+      Write-Warn "连接后发现 FallbackHome；特权模式将直接系统覆盖并重启扫包（不清 system 后用户装）"
+    } else {
+      Write-Warn "连接后发现 FallbackHome，先重启模拟器并救援"
+      $null = Recover-FallbackHome $adb $serial $apkPath
+    }
   }
 
   if ($PrivilegedInstall) {

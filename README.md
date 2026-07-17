@@ -1,5 +1,7 @@
 # MuMuClear
 
+来都来了 不点个⭐再走吗~?
+
 面向 **Android 15** 的 MuMu 模拟器桌面清理工具。
 
 用精简版 Lawnchair 替换系统默认桌面，去掉 MuMu 自带桌面上的广告与推荐内容，恢复干净、可点的应用图标桌面。
@@ -35,9 +37,13 @@
 >
 > **常见问题 3：重启后黑屏（FallbackHome）**  
 > MuMu 可写系统上 `mkdir` 有时会把目录弄成 `0777`，PackageManager **跳过** world-writable 的 priv-app → 没有桌面。  
-> 脚本现已强制 `0755/0644` 并校验；仍黑屏请再跑一次：`.\MuMuClear.ps1 -PrivilegedInstall`。## 下载
+> 脚本现已强制 `0755/0644` 并校验；仍黑屏请再跑一次：`.\MuMuClear.ps1 -PrivilegedInstall`。
+
+## 下载
 
 到 [Releases](https://github.com/MurasameCyan/MuMuClear/releases) 下载 **`MuMuClear-share.zip`**，解压即可。
+
+> 推送到 `main` 或打 `v*` 标签后，GitHub Actions 会**自动打包并发布**分享包。
 
 ## 使用教程
 
@@ -123,6 +129,9 @@ tool/
 - 若安装后黑屏或无法回桌面：执行 `.\MuMuClear.ps1 -RecoverOnly`
 
 > **常见问题 4：装好后「从多开器完全退出再开」又恢复广告**  
-> 直接改 /system 依赖 MuMu 的 system-diff，部分实例冷启动会回滚。  
-> 当前脚本在检测到 KernelSU 时会安装 **mumu_clear 模块**（数据在 /data/adb/modules），每次启动自动挂载清爽桌面，更抗回滚。  
-> 请确认实例已开 **Root**（KernelSU 依赖 root）。
+> 直接改 `/system` 依赖 MuMu 的 `system-diff.vdi`；若 host 侧 `phone.rom.reset != 0`，冷启动可能丢掉 system 修改。  
+> 当前脚本在特权安装时会：  
+> 1) 写回实例 `vm_config.json`：`phone.rom.reset=0`、`system_vdi.sharable=Writable`、`root=true`  
+> 2) **纯系统替换**覆盖 `/system/priv-app/app.lawnchair` 与 `/system/priv-app/Lawnchair`（0755/0644）  
+> 3) 校验 `system-diff.vdi` 是否落盘  
+> 请确认 **Root + 可写系统** 已开；改完后完整跑一次 `.\MuMuClear.ps1 -PrivilegedInstall`，再测「多开器完全退出 → 再开」。
