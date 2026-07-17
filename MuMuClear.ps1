@@ -603,19 +603,29 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
   $map = @{}
   foreach ($p in $cfgPorts) { $map[$p.Port] = $p }
   foreach ($p in $listen) {
-    if (-not $map.ContainsKey($p.Port)) {
-      # listen 兜底：尽量反查 vm_config 端口对应实例
-      $hit = $cfgPorts | Where-Object { $_.Port -eq $p.Port } | Select-Object -First 1
-      if ($hit) { $map[$p.Port] = $hit }
-      else {
-        $p | Add-Member -NotePropertyName DisplayName -NotePropertyValue "未命名/代理端口" -Force
-        $p | Add-Member -NotePropertyName Series -NotePropertyValue $null -Force
-        $p | Add-Member -NotePropertyName Android -NotePropertyValue $null -Force
-        $p | Add-Member -NotePropertyName Sdk -NotePropertyValue $null -Force
-        $p | Add-Member -NotePropertyName Model -NotePropertyValue $null -Force
-        $map[$p.Port] = $p
-      }
+    if ($map.ContainsKey($p.Port)) { continue }
+    # 已在 vm_config 里的端口优先
+    $hit = $cfgPorts | Where-Object { $_.Port -eq $p.Port } | Select-Object -First 1
+    if ($hit) { $map[$p.Port] = $hit; continue }
+
+    # 5555–5600 / 7555 是 MuMu 代理口，不是多开序号；挂进去会变成 Index=-1 干扰选择
+    $isProxyPort = ($p.Port -eq 7555) -or ($p.Port -ge 5555 -and $p.Port -le 5600)
+    if ($isProxyPort) {
+      Write-Host "  [·] 忽略代理端口 127.0.0.1:$($p.Port)（非多开编号）" -ForegroundColor DarkGray
+      continue
     }
+
+    # 其它未知监听口仅在没有 vm_config 时兜底（仍无真实 Index）
+    if ($cfgPorts.Count -gt 0) {
+      Write-Host "  [·] 忽略未登记端口 127.0.0.1:$($p.Port)（无多开 Index）" -ForegroundColor DarkGray
+      continue
+    }
+    $p | Add-Member -NotePropertyName DisplayName -NotePropertyValue "未命名/代理端口" -Force
+    $p | Add-Member -NotePropertyName Series -NotePropertyValue $null -Force
+    $p | Add-Member -NotePropertyName Android -NotePropertyValue $null -Force
+    $p | Add-Member -NotePropertyName Sdk -NotePropertyValue $null -Force
+    $p | Add-Member -NotePropertyName Model -NotePropertyValue $null -Force
+    $map[$p.Port] = $p
   }
 
   if ($cfgPorts.Count -gt 0) {
@@ -672,6 +682,13 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
     throw "没有可处理的 Android 15 在线实例（已排除 A12/其它版本）。请启动 A15 实例后重试。"
   }
 
+  # 选择列表只用真实多开编号（Index>=0）。Index=-1 是旧逻辑里的代理口残留，不展示。
+  $selectable = @($ranked | Where-Object { $_.Index -ge 0 })
+  if ($selectable.Count -eq 0) {
+    throw "在线 Android 15 未能对应到多开序号（仅检测到代理口）。请从多开器启动实例，或指定: .\MuMuClear.ps1 -Index N"
+  }
+  $ranked = $selectable
+
   # 用户已指定 -Index：校验该序号在可处理列表中
   if ($OnlyIndex -ge 0) {
     $hit = @($ranked | Where-Object { $_.Index -eq $OnlyIndex })
@@ -696,12 +713,12 @@ function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
     Write-Host ""
     Write-Host "检测到多个 Android 15 在线实例，请输入要处理的编号（Index）：" -ForegroundColor Yellow
     Write-Host ("  {0,-6} {1,-18} {2,-10} {3}" -f "Index", "名称", "系统", "adb") -ForegroundColor DarkGray
-    foreach ($c in $ranked) {
+    foreach ($c in ($ranked | Sort-Object Index)) {
       $ver = if ($c.Android) { "A$($c.Android)" } elseif ($c.Series) { "系列$($c.Series)" } else { "?" }
       Write-Host ("  {0,-6} {1,-18} {2,-10} {3}" -f $c.Index, $c.DisplayName, $ver, $c.Serial)
     }
     Write-Host ""
-    $allowed = @($ranked | Select-Object -ExpandProperty Index -Unique)
+    $allowed = @($ranked | Select-Object -ExpandProperty Index -Unique | Sort-Object)
     $chosen = $null
     for ($try = 0; $try -lt 5; $try++) {
       $raw = Read-Host "请输入 Index（回车默认 $($allowed[0])）"
