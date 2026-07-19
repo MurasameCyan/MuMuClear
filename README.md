@@ -98,10 +98,14 @@ cd C:\MuMuClear
 
 ```powershell
 .\MuMuClear.ps1 -PrivilegedInstall   # 推荐：清理桌面广告并安装清爽桌面
+.\MuMuClear.ps1 -Index 9 -PrivilegedInstall  # 指定多开编号
 .\MuMuClear.ps1 -RecoverOnly         # 黑屏 / 无法回桌面时的救援
 .\MuMuClear.ps1 -ConnectOnly         # 仅连接 adb，不改桌面
 .\MuMuClear.ps1 -Help
 ```
+
+> **多开选择**：只开 1 个 **Android 15** 实例时自动处理；多个 A15 在线时会列出多开器名称（`playerName`）并提示输入 Index。  
+> 非 A15（如 A12）实例会自动跳过。
 
 若提示无法运行脚本：
 
@@ -135,3 +139,19 @@ tool/
 > 2) **纯系统替换**覆盖 `/system/priv-app/app.lawnchair` 与 `/system/priv-app/Lawnchair`（0755/0644）  
 > 3) 校验 `system-diff.vdi` 是否落盘  
 > 请确认 **Root + 可写系统** 已开；改完后完整跑一次 `.\MuMuClear.ps1 -PrivilegedInstall`，再测「多开器完全退出 → 再开」。
+>
+> **常见问题 5：UU 远程开关机 / 重启异常**  
+> 清爽桌面安装本身**不是**「包坏了」：纯 system 替换后 guest 可为 SYSTEM+PRIVILEGED，且 **t7 实测在重新完整开机后，清爽桌面下 UU 开/关/重启均可**（见 `build/monitor_coldstart/t7_clean/uu_power_result.md`）。  
+> 常见分层：  
+> - host **收不到** `onGatewaySigClosePlayer`（指令未到）  
+> - 只到 Close/Shutdown，`create_shortcut` 却走 **`is player running, wake shell`** → **不 Launch**（装完后第一次常见）  
+> - 重新开机 / 状态干净后：Close → `create_shortcut` **`not running, start it`** → Launch（正常）  
+> 处理建议：  
+> 1) 装完清爽后 **先完整开机一次** 再测 UU 电源  
+> 2) 判据：`ClosePlayer`+`Shutdown` 算关到；自动开应见 `create_shortcut` + `is player not running, start it` + `Launch`；`UserAction` 后的 Launch 是手动  
+> 3) 卡住时 CLI 兜底（路径以本机为准，一般在 `MuMu\nx_main\`）：  
+> ```text
+> mumu-cli control -v N launch
+> mumu-cli control -v N restart
+> ```  
+> 4) 不要为 UU 电源反复叠 guest Provider
