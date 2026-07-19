@@ -590,6 +590,54 @@ function Assert-SystemDiffGrew([string]$InstDir, [long]$BeforeSize, [string]$Lab
   }
 }
 
+function Update-HostBootScreenshot([string]$AdbPath, [string]$Serial, [string]$InstDir) {
+  # UU 远程控制 / 多开器「采集模拟器」会读 private_shared\boot_screenshot.png。
+  # 特权安装重启后若截到黑屏/FallbackHome，预览会变成几 KB 黑图，远程侧报「采集模拟器出错」。
+  Write-Step "刷新 host 启动预览图（供 UU/多开器采集）"
+  if (-not $InstDir) {
+    $vms = Find-MuMuVmsRoot
+    $InstDir = Get-VmInstanceDir $vms $Index $Serial
+  }
+  if (-not $InstDir -or -not (Test-Path -LiteralPath $InstDir)) {
+    Write-Warn "未定位实例目录，跳过 boot_screenshot 刷新"
+    return $false
+  }
+  $share = Join-Path $InstDir "private_shared"
+  if (-not (Test-Path -LiteralPath $share)) {
+    try { New-Item -ItemType Directory -Path $share -Force | Out-Null } catch {}
+  }
+  $dest = Join-Path $share "boot_screenshot.png"
+  $tmpRemote = "/data/local/tmp/mumu_clear_boot.png"
+  $tmpLocal = Join-Path $env:TEMP ("mumu_clear_boot_{0}.png" -f ([Guid]::NewGuid().ToString("N").Substring(0, 8)))
+
+  try {
+    $null = Invoke-Adb $AdbPath -s $Serial shell "input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_MENU; cmd package set-home-activity --user 0 $HomeActivity; am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null 2>&1"
+    Start-Sleep -Seconds 3
+    $null = Invoke-Adb $AdbPath -s $Serial shell "screencap -p $tmpRemote"
+    if (Test-Path -LiteralPath $tmpLocal) { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue }
+    $pull = (Invoke-Adb $AdbPath -s $Serial pull $tmpRemote $tmpLocal).Trim()
+    Write-Host "  $pull"
+    if (-not (Test-Path -LiteralPath $tmpLocal)) {
+      Write-Warn "screencap 拉取失败，跳过预览图更新"
+      return $false
+    }
+    $len = [long](Get-Item -LiteralPath $tmpLocal).Length
+    if ($len -lt 20000) {
+      Write-Warn "预览图过小 (${len}B，可能仍是黑屏帧)，不覆盖 host 文件"
+      Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue
+      return $false
+    }
+    Copy-Item -LiteralPath $tmpLocal -Destination $dest -Force
+    Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue
+    $null = Invoke-Adb $AdbPath -s $Serial shell "rm -f $tmpRemote 2>/dev/null"
+    Write-Ok "已更新: $dest  ($([math]::Round($len/1KB,1)) KB)"
+    return $true
+  } catch {
+    Write-Warn "刷新 boot_screenshot 失败: $($_.Exception.Message)"
+    return $false
+  }
+}
+
 function Connect-MuMu([string]$AdbPath, [int]$OnlyIndex, [switch]$NoProxy) {
   Write-Step "自动探测 MuMu 端口并连接"
   $vms = Find-MuMuVmsRoot
@@ -1496,6 +1544,15 @@ if ($ConnectOnly) {
   $ready = Ensure-HomeReady $adb $serial $apkPath 2 -PrivilegedMode:$PrivilegedInstall
   if (-not $ready) {
     throw "安装完成但桌面未就绪。特权安装失败可回滚: .\MuMuClear.ps1 -RecoverOnly"
+  }
+
+  # 刷新 host 预览图，避免 UU 远程「采集模拟器出错」（黑 boot_screenshot）
+  try {
+    $vmsRoot2 = Find-MuMuVmsRoot
+    $inst2 = Get-VmInstanceDir $vmsRoot2 $Index $serial
+    $null = Update-HostBootScreenshot $adb $serial $inst2
+  } catch {
+    Write-Warn "boot_screenshot 刷新跳过: $($_.Exception.Message)"
   }
 
   Write-Step "完成"
