@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.mumu.bridge"
+    platformBuildVersionCode="35"
+    platformBuildVersionName="15">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:name=".BridgeApp"
+        android:label="MuMu Bridge"
+        android:allowBackup="false"
+        android:directBootAware="true">
+
+        <service
+            android:name=".BridgeService"
+            android:exported="false"
+            android:enabled="true"
+            android:foregroundServiceType="specialUse" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Also react when clean launcher becomes home / resumes via package events -->
+        <receiver
+            android:name=".LauncherWatcher"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <data android:scheme="package" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- stock Lawnchair MuMu hooks: UU/host may resolve these authorities by name -->
+        <provider
+            android:name=".DisplayProfileProvider"
+            android:authorities="app.lawnchair.displayProfileProvider"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true"
+            android:multiprocess="false" />
+
+        <provider
+            android:name=".AppCustomizeLabelProvider"
+            android:authorities="app.lawnchair.appCustomizeLabelProvider"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true"
+            android:multiprocess="false" />
+
+        <receiver
+            android:name=".MuMuNotificationReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="com.mumu.core.notification.action.DISMISS" />
+                <action android:name="com.mumu.core.notification.action.GRID_MIGRATOR" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
