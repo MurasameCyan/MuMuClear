@@ -121,17 +121,19 @@ jobs:
             - 黑屏救援：`.\MuMuClear.ps1 -RecoverOnly`
             - 仅连接：`.\MuMuClear.ps1 -ConnectOnly`
 
-            ### 本版要点（分享包复现用）
-            - **纯系统替换**覆盖 `/system/priv-app`（双路径 `app.lawnchair` + `Lawnchair`，0755/0644）
-            - Host 加固：`phone.rom.reset=0`、`system_vdi.sharable=Writable`、`root=true`，减轻冷启动回广告桌面
-            - 清爽 APK：`16.Dev.(#4651)` 系统特权桌面（实测可与 UU 远程电源共存）
-            - **UU 远程开关机**：装完后请先**完整开机一次**再测远程重启；若只关不开，用 CLI：
+            ### 本版要点（t7 最小路径分享包）
+            - **纯系统替换**：双路径 `/system/priv-app/app.lawnchair` + `Lawnchair`（0755/0644）
+            - Host：`phone.rom.reset=0`、`system_vdi.sharable=Writable`、`root=true`
+            - Recents overlay + privapp XML + 重启扫包 → SYSTEM+PRIVILEGED
+            - **默认不做**：MuMuBridge、用户层 `install -r`、boot_screenshot
+            - 扫包后 `uninstall-system-updates`，保持纯 system path
+            - 清爽 APK：`16.Dev.(#4651)`
+            - **UU**：装完先完整开机一次再测远程重启；只关不开：
               ```text
               mumu-cli control -v N launch
               mumu-cli control -v N restart
               ```
-            - **不再依赖** KernelSU 做冷启动持久化
-            - Windows CRLF 多行 adb shell 已处理；推送后校验远端 APK 大小
+            - 不依赖 KernelSU；Windows CRLF adb shell 已处理
 
             详见 README「常见问题 4 / 5」。
           files: |

@@ -88,17 +88,20 @@
   ConnectOnly / RecoverOnly / PrivilegedInstall 三选一，不能同时开。
 
   ============================================================
-  默认模式实际做了什么（PrivilegedInstall）
+  默认模式实际做了什么（PrivilegedInstall，t7 实测最小路径）
   ============================================================
   1) 读 MuMu vms 配置 + 监听端口，自动 adb connect
-  2) adb root
-  3) 安装 static RRO：config_recentsComponentName=app.lawnchair/...RecentsActivity
-  4) 写入 /system/etc/permissions/privapp-permissions-app.lawnchair.xml
-  5) 覆盖 MuMu 原版桌面双路径（同包名 app.lawnchair）：
+  2) Host 加固：phone.rom.reset=0 / root / system_vdi Writable
+  3) adb root；清用户版/data 残留；清旧 mumu_clear 模块残留
+  4) 安装 static RRO：config_recentsComponentName=app.lawnchair/...RecentsActivity
+  5) 写入 /system/etc/permissions/privapp-permissions-app.lawnchair.xml
+  6) 纯系统双路径覆盖（同包名 app.lawnchair）：
        /system/priv-app/app.lawnchair/app.lawnchair.apk
        /system/priv-app/Lawnchair/Lawnchair.apk   <--- 原版广告桌面路径，必须覆盖
-  6) 重启，PackageManager 授予 MANAGE_ACTIVITY_TASKS 等
-  7) 同签名用户更新（UPDATED_SYSTEM_APP）+ set-home-activity + 拉起
+     目录 0755 / APK 0644；校验大小与 system-diff
+  7) 重启扫包 → SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS
+  8) 卸掉可能出现的用户更新层，保持纯 system；set-home-activity + 拉起
+  默认不做：MuMuBridge、同签名用户 install -r、boot_screenshot 刷新
   数据目录仍是：/data/user/0/app.lawnchair
 
   为何「清完一会重启又恢复原版」：
@@ -1103,12 +1106,13 @@ function Remove-RecentsOverlay([string]$AdbPath, [string]$Serial) {
 }
 
 function Test-IsStockMuMuLauncher([string]$AdbPath, [string]$Serial) {
-  # MuMu A15 原版桌面就是 app.lawnchair（/system/priv-app/Lawnchair），带广告/会员 SDK。
-  $info = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep -E 'versionName=|codePath=|MuMuNotification|com\.mumu\.core' | head -12").Trim()
+  # 只按版本/签名/路径判原版。不要用 com.mumu.core 字符串：清爽包 dumpsys 也可能出现残留注册，
+  # 会导致 t6/t7 类「已是 16.Dev 仍误报原版」。
+  $info = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep -E 'versionName=|signatures=|codePath=' | head -12").Trim()
   if (-not $info) { return $false }
   if ($info -match "versionName=15\.0\.0\.1") { return $true }
-  if ($info -match "com\.mumu\.core|MuMuNotification") { return $true }
-  if ($info -match "codePath=/system/priv-app/Lawnchair" -and $info -notmatch "16\.Dev") { return $true }
+  if ($info -match "signatures:\[b4addb29\]") { return $true }
+  if ($info -match "codePath=/system/priv-app/Lawnchair" -and $info -notmatch "16\.Dev" -and $info -notmatch "versionName=16") { return $true }
   return $false
 }
 
@@ -1220,13 +1224,13 @@ stat -c '%n %s' /system/priv-app/app.lawnchair/app.lawnchair.apk /system/priv-ap
 }
 
 function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkPath, [switch]$SkipReboot) {
-  Write-Step "特权安装（纯系统替换）: priv-app + privapp XML + recents overlay"
-  Write-Host "  路线: 直接覆盖 /system/priv-app（不走 KernelSU 模块）" -ForegroundColor DarkGray
-  Write-Host "  目标: SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS；目录 0755/0644；host 关 rom.reset" -ForegroundColor DarkGray
+  Write-Step "特权安装（纯系统替换，t7 最小路径）: priv-app + privapp XML + recents overlay"
+  Write-Host "  路线: 直接覆盖 /system/priv-app（不走 KernelSU / 不装 MuMuBridge / 不做用户层 install -r）" -ForegroundColor DarkGray
+  Write-Host "  目标: 纯 system SYSTEM+PRIVILEGED + MANAGE_ACTIVITY_TASKS；0755/0644；host rom.reset=0" -ForegroundColor DarkGray
   if (-not (Test-Path -LiteralPath $ApkPath)) { throw "APK 不存在: $ApkPath" }
   $full = (Resolve-Path -LiteralPath $ApkPath).Path
 
-  # host 侧先关 rom.reset，避免冷启动丢掉 system-diff
+  # host 侧先关 rom.reset，避免冷启动丢掉 system-diff（t7 必做）
   $vmsRoot = Find-MuMuVmsRoot
   $instDir = Ensure-HostVmPersistence $vmsRoot $Index $Serial
   $diffBefore = 0L
@@ -1243,16 +1247,14 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
     Write-Warn "检测到 MuMu 原版 app.lawnchair（广告桌面），将覆盖系统路径"
   }
 
-  Write-Step "移除用户版 app.lawnchair（避免盖住 system 特权包）"
-  $null = Invoke-Adb $AdbPath -s $Serial uninstall $PackageName
-  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /data/app/*app.lawnchair* /data/app/*lawnchair* /data/user/0/$PackageName /data/user_de/0/$PackageName /data/data/$PackageName 2>/dev/null"
+  Write-Step "移除用户版 / 用户更新层 app.lawnchair（保持纯 system）"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall-system-updates $PackageName >/dev/null 2>&1; pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1; rm -rf /data/app/*app.lawnchair* /data/app/*lawnchair* /data/user/0/$PackageName /data/user_de/0/$PackageName /data/data/$PackageName 2>/dev/null"
 
   Install-RecentsOverlay $AdbPath $Serial
   # overlay 也强制安全权限
   $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0644 /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null; chown root:root /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null"
 
-  # 清爽桌面缺 MuMu 宿主钩子：补远程桥接（尽量装，失败不中断）
-  try { $null = Install-MuMuRemoteBridge $AdbPath $Serial } catch { Write-Warn "远程桥接安装异常: $($_.Exception.Message)" }
+  # 默认不做 MuMuBridge（t7 有效路径不依赖它；需要时再单独开）
 
   $xmlLocal = $null
   foreach ($c in @(
@@ -1288,16 +1290,21 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   $ok = Wait-PackagePrivileged $AdbPath $Serial 45
   $stillStock = Test-IsStockMuMuLauncher $AdbPath $Serial
   if ((-not $ok -or $stillStock) -and -not $SkipReboot) {
-    Write-Warn "重启后未就绪或仍是原版广告包，二次系统覆盖并重启"
+    Write-Warn "重启后未就绪或仍是原版广告包，二次系统覆盖并重启（仍不做用户层 install）"
     $ls = (Invoke-Adb $AdbPath -s $Serial shell "ls -ld /system/priv-app/app.lawnchair /system/priv-app/Lawnchair 2>/dev/null; ls -l /system/priv-app/app.lawnchair/*.apk /system/priv-app/Lawnchair/*.apk 2>/dev/null; md5sum /system/priv-app/Lawnchair/Lawnchair.apk 2>/dev/null").Trim()
     Write-Host "  $ls"
     Install-SystemLawnchairApk $AdbPath $Serial $full
     Assert-SystemDiffGrew $instDir $diffBefore "二次写入后"
-    $null = Invoke-Adb $AdbPath -s $Serial shell "pm install -r -g -d /system/priv-app/app.lawnchair/app.lawnchair.apk >/dev/null 2>&1"
+    # 不再 pm install -r system 路径，避免制造 UPDATED_SYSTEM_APP
     Reboot-And-Reconnect $AdbPath $Serial 180
     Ensure-Root $AdbPath $Serial
     $ok = Wait-PackagePrivileged $AdbPath $Serial 60
   }
+
+  # 扫包后若仍出现用户更新层，卸掉，保持 t7 验收的纯 system path
+  Write-Step "确保纯 system 路径（卸用户更新层）"
+  $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall-system-updates $PackageName >/dev/null 2>&1"
+  Start-Sleep -Seconds 1
 
   $path = (Invoke-Adb $AdbPath -s $Serial shell pm path $PackageName).Trim()
   Write-Ok "pm path: $path"
@@ -1305,12 +1312,10 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   Write-Host "  $flags"
   $grant = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName | grep 'MANAGE_ACTIVITY_TASKS: granted' | head -2").Trim()
   Write-Host "  $grant"
+  $ver = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
+  Write-Host "  $ver"
 
-  if (-not $ok) {
-    # 最后兜底：若 system 文件在但 PM 未扫到，不要留下 FallbackHome；先用户安装保证能进桌面，并明确警告
-    Write-Warn "特权扫包失败，临时用户安装以脱离黑屏（点图标可能仍未安装，需再跑 PrivilegedInstall）"
-    $null = Invoke-Adb $AdbPath -s $Serial install -r -g $full
-    $null = Invoke-Adb $AdbPath -s $Serial shell "cmd package set-home-activity --user 0 $HomeActivity; am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+  if (-not $ok -and -not (Test-IsPrivilegedSystemPackage $AdbPath $Serial)) {
     throw @"
 特权安装失败：app.lawnchair 没有 SYSTEM+PRIVILEGED 或 MANAGE_ACTIVITY_TASKS 未授予。
 这会导致点击图标弹出「未安装该应用」，或重启后 FallbackHome 黑屏。
@@ -1328,26 +1333,20 @@ flags  : $flags
 grant  : $grant
 "@
   }
-  Write-Ok "SYSTEM+PRIVILEGED 且 MANAGE_ACTIVITY_TASKS granted"
+  # 卸用户更新后再确认一次特权
+  if (-not (Test-IsPrivilegedSystemPackage $AdbPath $Serial)) {
+    throw "卸用户更新后特权丢失。请确认可写系统已开并重跑 -PrivilegedInstall。`npm path: $path`nflags: $flags"
+  }
+  Write-Ok "SYSTEM+PRIVILEGED 且 MANAGE_ACTIVITY_TASKS granted（纯 system）"
 
   if (Test-IsStockMuMuLauncher $AdbPath $Serial) {
-    throw "安装后仍检测到 MuMu 原版广告桌面组件。请确认可写系统已生效后重试。"
+    throw "安装后仍检测到 MuMu 原版广告桌面（15.0.0.1 / b4addb29）。请确认可写系统已生效后重试。"
+  }
+  if ($path -notmatch "/system/priv-app/") {
+    Write-Warn "pm path 不在 /system/priv-app（当前: $path）；已尝试 uninstall-system-updates"
   }
 
-  # 可选：同签名用户更新。若破坏特权则回滚
-  Write-Step "同签名用户更新（保留 SYSTEM/PRIVILEGED）"
-  $upd = (Invoke-Adb $AdbPath -s $Serial install -r -g $full).Trim()
-  Write-Host "  $upd"
-  if ($upd -match "Success") {
-    if (-not (Test-IsPrivilegedSystemPackage $AdbPath $Serial)) {
-      Write-Warn "用户更新后特权异常，卸载用户更新，保留纯 system 包"
-      $null = Invoke-Adb $AdbPath -s $Serial shell "pm uninstall $PackageName >/dev/null 2>&1; pm uninstall --user 0 $PackageName >/dev/null 2>&1"
-    } else {
-      Write-Ok "UPDATED_SYSTEM_APP 且特权仍在"
-    }
-  } else {
-    Write-Warn "用户更新跳过（不影响特权）: $upd"
-  }
+  # 默认不做「同签名用户更新 install -r」（会变成 UPDATED_SYSTEM_APP，偏离 t7 纯 system 验收）
 
   $recents = (Invoke-Adb $AdbPath -s $Serial shell "dumpsys activity recents | head -4").Trim()
   Write-Host "  $recents"
@@ -1602,37 +1601,28 @@ if ($ConnectOnly) {
     throw "安装完成但桌面未就绪。特权安装失败可回滚: .\MuMuClear.ps1 -RecoverOnly"
   }
 
-  # 刷新 host 预览图，避免 UU 远程「采集模拟器出错」（黑 boot_screenshot）
-  try {
-    $vmsRoot2 = Find-MuMuVmsRoot
-    $inst2 = Get-VmInstanceDir $vmsRoot2 $Index $serial
-    $null = Update-HostBootScreenshot $adb $serial $inst2
-  } catch {
-    Write-Warn "boot_screenshot 刷新跳过: $($_.Exception.Message)"
-  }
-
-  # 启动远程桥接服务（若已装）
-  try {
-    $null = Invoke-Adb $adb -s $serial shell "am start-foreground-service -n com.mumu.bridge/.BridgeService >/dev/null 2>&1 || am startservice -n com.mumu.bridge/.BridgeService >/dev/null 2>&1"
-    $bp = (Invoke-Adb $adb -s $serial shell pm path com.mumu.bridge).Trim()
-    if ($bp -match "package:") { Write-Ok "远程桥接已就绪: $bp" }
-  } catch {}
+  # 默认不做 boot_screenshot / MuMuBridge（t7 最小路径外；需要时再单独加）
 
   Write-Step "完成"
   Write-Host ""
   Write-Host "设备: $serial" -ForegroundColor Green
   Write-Host "包名: $PackageName" -ForegroundColor Green
   Write-Host "数据: /data/user/0/$PackageName" -ForegroundColor Green
-  $modeLabel = if ($PrivilegedInstall) { "PrivilegedInstall (priv-app+recents，修复点击未安装)" } elseif ($UserInstallOnly) { "用户安装（会未安装，仅调试）" } else { "默认" }
+  $modeLabel = if ($PrivilegedInstall) { "PrivilegedInstall（纯 system 替换，t7 最小路径）" } elseif ($UserInstallOnly) { "用户安装（会未安装，仅调试）" } else { "默认" }
   Write-Host ("模式: " + $modeLabel) -ForegroundColor Green
   Write-Host "防卡住: 已自动校验/救援通过" -ForegroundColor Green
+  $finalPath = (Invoke-Adb $adb -s $serial shell pm path $PackageName).Trim()
   $finalVer = (Invoke-Adb $adb -s $serial shell "dumpsys package $PackageName 2>/dev/null | grep versionName= | head -1").Trim()
+  Write-Host ("路径: " + $finalPath) -ForegroundColor Green
   Write-Host ("版本: " + $finalVer) -ForegroundColor Green
   if ($finalVer -match '15\.0\.0\.1') { throw '完成后仍是原版 15.0.0.1，说明改错实例或系统写入未生效' }
   Write-Host ""
+  Write-Host "提示: 装完请先完整开机一次再测 UU 远程重启；只关不开可用 mumu-cli control -v N launch" -ForegroundColor DarkGray
+  Write-Host ""
   Write-Host "常用:" -ForegroundColor Green
-  Write-Host "  .\MuMuClear.ps1                     # 默认=特权安装（修复未安装）"
+  Write-Host "  .\MuMuClear.ps1                     # 默认=特权安装（纯 system）"
   Write-Host "  .\MuMuClear.ps1 -PrivilegedInstall  # 同上"
+  Write-Host "  .\MuMuClear.ps1 -Index N -PrivilegedInstall"
   Write-Host "  .\MuMuClear.ps1 -RecoverOnly        # 回滚到用户安装 / 黑屏救援"
   Write-Host "  .\MuMuClear.ps1 -ConnectOnly        # 只连接"
   Write-Host "  .\MuMuClear.ps1 -Help"
