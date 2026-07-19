@@ -1019,6 +1019,59 @@ function Get-PrivAppPermissionsXml {
 "@
 }
 
+function Install-MuMuRemoteBridge([string]$AdbPath, [string]$Serial) {
+  # 清爽桌面不含 MuMu 宿主桥。补一个最小 priv-app：
+  # - ServiceManager("nemuinit") / android.INemuInit.sendMessageToHost
+  # - 广播 com.mumu.LAUNCHER_LIFECYCLE 给 com.mumu.store
+  # 用于缓解 UU 远程「采集/开关机」依赖原版桌面钩子的问题。
+  Write-Step "安装 MuMu 远程桥接 priv-app (com.mumu.bridge)"
+  $bridgeLocal = $null
+  foreach ($c in @(
+      (Join-Path $ToolDir "MuMuBridge.apk"),
+      (Join-Path $ScriptDir "MuMuBridge.apk"),
+      (Join-Path $ToolDir "tool\MuMuBridge.apk")
+    )) {
+    if (Test-Path -LiteralPath $c) { $bridgeLocal = $c; break }
+  }
+  if (-not $bridgeLocal) {
+    Write-Warn "未找到 tool\MuMuBridge.apk，跳过远程桥接安装"
+    return $false
+  }
+  $full = (Resolve-Path -LiteralPath $bridgeLocal).Path
+  $push = (Invoke-Adb $AdbPath -s $Serial push $full /data/local/tmp/MuMuBridge.apk).Trim()
+  Write-Host "  $push"
+  $shell = (Invoke-Adb $AdbPath -s $Serial shell @"
+umask 022
+set -e
+mkdir -p /system/priv-app/com.mumu.bridge
+cp /data/local/tmp/MuMuBridge.apk /system/priv-app/com.mumu.bridge/com.mumu.bridge.apk
+chmod 0755 /system/priv-app/com.mumu.bridge
+chmod 0644 /system/priv-app/com.mumu.bridge/com.mumu.bridge.apk
+chown root:root /system/priv-app/com.mumu.bridge /system/priv-app/com.mumu.bridge/com.mumu.bridge.apk
+cat > /system/etc/permissions/privapp-permissions-com.mumu.bridge.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+  <privapp-permissions package="com.mumu.bridge">
+    <permission name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <permission name="android.permission.FOREGROUND_SERVICE"/>
+    <permission name="android.permission.QUERY_ALL_PACKAGES"/>
+  </privapp-permissions>
+</permissions>
+XML
+chmod 0644 /system/etc/permissions/privapp-permissions-com.mumu.bridge.xml
+chown root:root /system/etc/permissions/privapp-permissions-com.mumu.bridge.xml
+sync
+ls -la /system/priv-app/com.mumu.bridge/
+"@).Trim()
+  Write-Host "  $shell"
+  if ($shell -match "Read-only|Permission denied|No such file") {
+    Write-Warn "远程桥接写入失败（不影响清爽桌面）: $shell"
+    return $false
+  }
+  Write-Ok "已写入 /system/priv-app/com.mumu.bridge（重启后扫包）"
+  return $true
+}
+
 function Install-RecentsOverlay([string]$AdbPath, [string]$Serial) {
   Write-Step "安装 recents overlay (config_recentsComponentName)"
   $overlayLocal = $null
@@ -1197,6 +1250,9 @@ function Install-PrivilegedHome([string]$AdbPath, [string]$Serial, [string]$ApkP
   Install-RecentsOverlay $AdbPath $Serial
   # overlay 也强制安全权限
   $null = Invoke-Adb $AdbPath -s $Serial shell "chmod 0644 /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null; chown root:root /product/overlay/LawnchairRecentsOverlay.apk 2>/dev/null"
+
+  # 清爽桌面缺 MuMu 宿主钩子：补远程桥接（尽量装，失败不中断）
+  try { $null = Install-MuMuRemoteBridge $AdbPath $Serial } catch { Write-Warn "远程桥接安装异常: $($_.Exception.Message)" }
 
   $xmlLocal = $null
   foreach ($c in @(
@@ -1554,6 +1610,13 @@ if ($ConnectOnly) {
   } catch {
     Write-Warn "boot_screenshot 刷新跳过: $($_.Exception.Message)"
   }
+
+  # 启动远程桥接服务（若已装）
+  try {
+    $null = Invoke-Adb $adb -s $serial shell "am start-foreground-service -n com.mumu.bridge/.BridgeService >/dev/null 2>&1 || am startservice -n com.mumu.bridge/.BridgeService >/dev/null 2>&1"
+    $bp = (Invoke-Adb $adb -s $serial shell pm path com.mumu.bridge).Trim()
+    if ($bp -match "package:") { Write-Ok "远程桥接已就绪: $bp" }
+  } catch {}
 
   Write-Step "完成"
   Write-Host ""
