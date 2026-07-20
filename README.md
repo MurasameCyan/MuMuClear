@@ -97,15 +97,15 @@ cd C:\MuMuClear
 ### 常用命令
 
 ```powershell
-.\MuMuClear.ps1 -PrivilegedInstall   # 推荐：纯 system 替换清爽桌面（t7 最小路径）
+.\MuMuClear.ps1 -PrivilegedInstall   # 推荐：t7 成功集合（system+Bridge+用户更新）
 .\MuMuClear.ps1 -Index 9 -PrivilegedInstall  # 指定多开编号
 .\MuMuClear.ps1 -RecoverOnly         # 黑屏 / 无法回桌面时的救援
 .\MuMuClear.ps1 -ConnectOnly         # 仅连接 adb，不改桌面
 .\MuMuClear.ps1 -Help
 ```
 
-> 当前默认路径只做：host `rom.reset=0` + 双路径 system 覆盖 + recents overlay + 重启扫包 + 纯 system 校验。  
-> **默认不做** MuMuBridge、同签名用户 `install -r`、boot_screenshot 刷新。
+> 启动器 APK 仍是同一净化包。默认非启动器与 **t7 成功装机**对齐：  
+> host `rom.reset=0` + 双路径 system + recents + **MuMuBridge** + 同签名用户 `install -r` + boot_screenshot + 尝试启动 BridgeService。
 
 > **多开选择**：只开 1 个 **Android 15** 实例时自动处理；多个 A15 在线时会列出多开器名称（`playerName`）并提示输入 Index。  
 > 非 A15（如 A12）实例会自动跳过。
